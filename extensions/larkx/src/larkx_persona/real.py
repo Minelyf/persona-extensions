@@ -29,12 +29,109 @@ class Expired(Exception):
     """The session is over: the user has to scan again. Not being able to reach Feishu is any other exception."""
 
 
+def _fields(raw):
+    """The length-delimited fields of a protobuf message, the first of each by number, as bytes. Enough to read the
+    rich text's few string properties without generated classes; anything malformed ends the read."""
+    out, i, n = {}, 0, len(raw)
+
+    def varint():
+        nonlocal i
+        shift = value = 0
+        while i < n:
+            b = raw[i]
+            i += 1
+            value |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return value
+            shift += 7
+        raise ValueError("truncated varint")
+
+    try:
+        while i < n:
+            key = varint()
+            number, wire = key >> 3, key & 7
+            if wire == 0:
+                varint()
+            elif wire == 1:
+                i += 8
+            elif wire == 5:
+                i += 4
+            elif wire == 2:
+                size = varint()
+                out.setdefault(number, raw[i:i + size])
+                i += size
+            else:
+                break
+    except ValueError:
+        pass
+    return out
+
+
+def _string(raw, number):
+    return (_fields(raw).get(number) or b"").decode("utf-8", "replace")
+
+
+# LarkAgentX's rich text: its tags (RichTextElement.Tag) and what it writes for the ones with no text.
+_TEXT_TAGS = (1, 3, 7, 8, 9, 17)  # TEXT, P, B, I, U, LINK: TextProperty.content (LINK: LinkProperty.url) is field 1
+_AT, _ANCHOR, _PARAGRAPH = 5, 6, 3
+_PLACEHOLDERS = {2: "[图片]", 5: "[@]", 10: "[表情]", 18: "[视频]", 22: "[文档]"}
+
+
+def rich_text(rich):
+    """A TEXT or POST message's rich text as LarkAgentX reads it (`extract_rich_text`), but with its links. LarkAgentX
+    drops an A element whole, its title and its address: a pasted Feishu doc link reached Persona as the words around
+    it (2026-11-12). A link is its title, a space and its address (the address alone when the title is it or empty).
+    None when the message has no link, so LarkAgentX's own text stays."""
+    try:
+        dictionary = rich["elements"]["dictionary"]
+    except (KeyError, TypeError):
+        return None
+    if not any(isinstance(v, dict) and v.get("tag") == _ANCHOR for v in dictionary.values()):
+        return None
+    ids = rich.get("elementIds") or []
+    if ids:
+        ordered = [dictionary[k] for k in ids if k in dictionary] + [v for k, v in dictionary.items() if k not in set(ids)]
+    else:
+        try:
+            ordered = [v for _, v in sorted(dictionary.items(), key=lambda item: int(item[0]))]
+        except ValueError:
+            ordered = list(dictionary.values())
+    text, after_link = "", False
+    for v in ordered:
+        tag, prop = v.get("tag", 1), v.get("property")
+        if not prop:
+            continue
+        piece = None
+        if tag in _TEXT_TAGS:
+            piece = _string(prop, 1) + ("\n" if tag == _PARAGRAPH else "")
+        elif tag == _AT:
+            piece = _string(prop, 2) or None  # AtProperty.content
+        elif tag == _ANCHOR:
+            href, title = _string(prop, 1), _string(prop, 2) or _string(prop, 3)  # href, content, textContent
+            title = title.strip()
+            piece = href if not title or title == href else ("%s %s" % (title, href) if href else title)
+            if piece and text and not text[-1].isspace():
+                piece = " " + piece
+        if piece is None:
+            piece = _PLACEHOLDERS.get(tag, "")
+        if after_link and piece and not piece[0].isspace():
+            piece = " " + piece  # an address glued to the next words is a different address
+        text += piece
+        after_link = tag == _ANCHOR and bool(piece)
+    return text
+
+
 def normalize(msg, extract_key):
     """A message of LarkAgentX's, live or from history, as the connector keeps it. Pure, for the tests."""
     msg_type = msg.get("msg_type") or 0
     name = msg.get("msg_type_name") or "UNKNOWN"
     data = msg.get("content_data") or {}
     key = extract_key(msg_type, data) if isinstance(data, dict) else ""
+    text = msg.get("content") or ""
+    if name in ("TEXT", "POST") and isinstance(data, dict):
+        linked = rich_text(data.get("richText"))
+        if linked is not None:
+            text = ("[富文本] %s\n%s" % (data.get("title", ""), linked)).strip() if name == "POST" else linked
     media = []
     if name in ("IMAGE", "STICKER") and key:
         media = [{"kind": name.lower(), "key": key}]
@@ -52,7 +149,7 @@ def normalize(msg, extract_key):
         "id": str(msg.get("msg_id") or ""), "chat": str(msg.get("chat_id") or ""),
         "chat_kind": "dm" if msg.get("chat_type") == 1 else "group",
         "position": int(msg.get("position") or 0), "sender": str(msg.get("from_id") or ""), "type": name,
-        "text": msg.get("content") or "", "at": at or time.time(), "root": "" if root == "0" else root,
+        "text": text, "at": at or time.time(), "root": "" if root == "0" else root,
         "parent": msg.get("parent_id") or "", "at_me": bool(msg.get("at_me")), "media": media,
     }
 

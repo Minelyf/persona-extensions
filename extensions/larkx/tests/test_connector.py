@@ -531,6 +531,51 @@ class NormalizeTest(unittest.TestCase):
     def test_milliseconds_become_seconds(self):
         self.assertEqual(normalize({"create_time": 1793000000000}, self.key)["at"], 1793000000.0)
 
+    @staticmethod
+    def prop(*fields):
+        """A rich text element's property: (field number, string) pairs, as protobuf writes them."""
+        out = b""
+        for number, value in fields:
+            raw = value.encode()
+            out += bytes([number << 3 | 2, len(raw)]) + raw
+        return out
+
+    def rich(self, *elements):
+        """TextContent / PostContent as protobuf_to_dict gives it: (tag, property) elements in order."""
+        ids = [str(i) for i in range(1, len(elements) + 1)]
+        return {"richText": {"elementIds": ids, "elements": {"dictionary": {
+            i: {"tag": tag, "property": prop} for i, (tag, prop) in zip(ids, elements)}}}}
+
+    def test_a_pasted_doc_link_keeps_its_title_and_address(self):
+        # 2026-11-12: LarkAgentX's text dropped the A element whole, so only the words before the link arrived.
+        url = "https://example.feishu.cn/docx/AbC123"
+        data = self.rich((1, self.prop((1, "请看一下 "))), (6, self.prop((1, url), (2, "示例文档"))))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "请看一下 ", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "请看一下 示例文档 " + url)
+
+    def test_a_link_in_the_middle_keeps_its_place_and_stays_apart_from_the_next_words(self):
+        url = "https://example.com/a"
+        data = self.rich((1, self.prop((1, "看"))), (6, self.prop((1, url), (3, url))), (1, self.prop((1, "，周五前回复"))),
+                         (5, self.prop((1, "ou_1"), (2, "@小王"))))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "看，周五前回复@小王", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "看 " + url + " ，周五前回复@小王")
+
+    def test_a_post_with_a_link_keeps_larkagentxs_title_line(self):
+        data = self.rich((3, self.prop((1, "正文"))), (6, self.prop((1, "https://example.com/b"), (2, "链接"))))
+        data["title"] = "周报"
+        m = normalize({"msg_type": 2, "msg_type_name": "POST", "content": "[富文本] 周报\n正文\n", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "[富文本] 周报\n正文\n链接 https://example.com/b")
+
+    def test_without_a_link_larkagentxs_text_stays(self):
+        data = self.rich((1, self.prop((1, "你好"))), (10, self.prop((1, "smile"))))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "你好[表情]", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "你好[表情]")
+
+    def test_a_malformed_link_property_does_not_break_the_message(self):
+        data = self.rich((1, self.prop((1, "看 "))), (6, b"\x0a\xff\x01"))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "看 ", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "看 ")
+
     def test_media(self):
         image = normalize({"msg_type_name": "IMAGE", "content_data": {"key": "k"}}, self.key)
         self.assertEqual(image["media"], [{"kind": "image", "key": "k"}])

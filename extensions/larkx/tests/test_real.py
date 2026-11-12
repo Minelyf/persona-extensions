@@ -94,6 +94,21 @@ class RealTest(unittest.TestCase):
         self.assertEqual(m["type"], "IMAGE")
         self.assertEqual(m["media"], [{"kind": "image", "key": "img_key"}])
 
+    def test_a_pasted_doc_link_keeps_its_title_and_address(self):
+        # LarkAgentX's own text drops an A element whole; normalize rebuilds the text from the decoded rich text.
+        P, url = self.P, "https://example.feishu.cn/docx/AbC123"
+        words = P.TextProperty()
+        words.content = "请看一下 "
+        anchor = b"".join(bytes([n << 3 | 2, len(v)]) + v for n, v in ((1, url.encode()), (2, "示例文档".encode())))
+        tc = P.TextContent()
+        tc.text = "请看一下 "
+        for key, tag, prop in (("1", 1, words.SerializeToString()), ("2", 6, anchor)):
+            tc.richText.elementIds.append(key)
+            element = tc.richText.elements.dictionary[key]
+            element.tag, element.property = tag, prop
+        m = self.normalized(self.frame([self.message("9005", 4, tc.SerializeToString())]))[0]
+        self.assertEqual(m["text"], "请看一下 示例文档 " + url)
+
     def test_credentials_go_through_the_hub_and_never_a_file(self):
         from larkx_persona.real import RealBackend
         saved = []
