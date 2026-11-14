@@ -1,5 +1,11 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.19 (pre-release)
+
+- **Reruns wait for completed days.** `rerun_range` no longer runs today or future dates. Premature or invalid
+  daily/synth records and stale rerun markers no longer block the formal daily recovery or post-rerun synthesis;
+  synthesis must follow the latest valid daily run.
+
 ## 0.2.0-beta.18 (pre-release)
 
 - **Cancellation no longer drops correction issues.** After a successful gather, `signals.Run` checkpoints

@@ -124,7 +124,11 @@ func (a *app) schedule(ctx context.Context) {
 
 func (a *app) tick(ctx context.Context) {
 	c := a.c
-	now := time.Now().In(c.Loc)
+	nowFn := c.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	now := nowFn().In(c.Loc)
 	at := func(hhmm string) time.Time {
 		var h, m int
 		fmt.Sscanf(hhmm, "%d:%d", &h, &m)
@@ -143,8 +147,17 @@ func (a *app) tick(ctx context.Context) {
 		a.start(ctx, "daily", yesterday)
 		return
 	}
-	// rerun_range: days digested again, one at a time, with the current daily prompt; each only once per prompt.
-	for _, day := range c.Cfg.RerunDays() {
+	// rerun_range: only completed local days are rerun, one at a time with the current daily prompt. An early daily
+	// must not suppress the formal pass after the day ends. Each day runs only once per prompt.
+	days := c.Cfg.RerunDays()
+	today := now.Format("2006-01-02")
+	for i, day := range days {
+		if day >= today {
+			days = days[:i]
+			break
+		}
+	}
+	for _, day := range days {
 		if !a.reran(day) && !a.attempted(day) {
 			a.start(ctx, "daily", day)
 			return
@@ -162,7 +175,7 @@ func (a *app) tick(ctx context.Context) {
 		log.Printf("enkeep-memory: weekly report: %v", err)
 	}
 	// After the days of rerun_range are digested with the current prompt, their judgements are filed once.
-	if days := c.Cfg.RerunDays(); len(days) > 0 && a.reran(days[len(days)-1]) && !a.ran("synth", days[len(days)-1]) && !a.attempted("synth@"+days[len(days)-1]) {
+	if len(days) > 0 && a.reran(days[len(days)-1]) && !a.synthAfterDaily(days[len(days)-1]) && !a.attempted("synth@"+days[len(days)-1]) {
 		a.start(ctx, "synth", days[len(days)-1])
 	}
 }
@@ -179,8 +192,55 @@ func (a *app) backfillNext() string {
 
 func (a *app) reran(day string) bool {
 	a.c.St.Lock()
+	marked := slices.Contains(a.c.St.S.Reruns, day+"@"+schema.DailyPrompt)
+	a.c.St.Unlock()
+	// A marker alone does not prove the day completed after its local day end.
+	return marked && a.ran("daily", day)
+}
+
+// validDailyFinishLocked returns the finish time of a daily that really completed after its local day end.
+// a.c.St must be locked by the caller.
+func (a *app) validDailyFinishLocked(r *store.Run, day string) (time.Time, bool) {
+	if r.Kind != "daily" || r.Period != day || r.Finished == "" || r.DryRun {
+		return time.Time{}, false
+	}
+	started, startErr := time.Parse(time.RFC3339, r.Started)
+	finished, finishErr := time.Parse(time.RFC3339, r.Finished)
+	periodDay, dayErr := time.ParseInLocation("2006-01-02", day, a.c.Loc)
+	if startErr != nil || finishErr != nil || dayErr != nil {
+		return time.Time{}, false
+	}
+	if started.Before(periodDay.AddDate(0, 0, 1)) || finished.Before(started) {
+		return time.Time{}, false
+	}
+	return finished, true
+}
+
+// synthAfterDaily reports whether a synth started after the latest valid daily for day finished.
+func (a *app) synthAfterDaily(day string) bool {
+	a.c.St.Lock()
 	defer a.c.St.Unlock()
-	return slices.Contains(a.c.St.S.Reruns, day+"@"+schema.DailyPrompt)
+	var latest time.Time
+	for _, r := range a.c.St.S.Runs {
+		finished, ok := a.validDailyFinishLocked(r, day)
+		if ok && finished.After(latest) {
+			latest = finished
+		}
+	}
+	if latest.IsZero() {
+		return false
+	}
+	for _, r := range a.c.St.S.Runs {
+		if r.Kind != "synth" || r.Period != day || r.Finished == "" || r.DryRun {
+			continue
+		}
+		started, startErr := time.Parse(time.RFC3339, r.Started)
+		finished, finishErr := time.Parse(time.RFC3339, r.Finished)
+		if startErr == nil && finishErr == nil && !finished.Before(started) && !started.Before(latest) {
+			return true
+		}
+	}
+	return false
 }
 
 // attempted says whether a daily run of the day already started since this process did: a rerun that failed is
@@ -195,9 +255,27 @@ func (a *app) ran(kind, period string) bool {
 	a.c.St.Lock()
 	defer a.c.St.Unlock()
 	for _, r := range a.c.St.S.Runs {
-		if r.Kind == kind && r.Period == period && r.Finished != "" && !r.DryRun {
+		if r.Kind != kind || r.Period != period || r.Finished == "" || r.DryRun {
+			continue
+		}
+		if kind == "daily" {
+			if _, ok := a.validDailyFinishLocked(r, period); !ok {
+				continue
+			}
 			return true
 		}
+		if kind == "synth" {
+			started, startErr := time.Parse(time.RFC3339, r.Started)
+			finished, finishErr := time.Parse(time.RFC3339, r.Finished)
+			day, dayErr := time.ParseInLocation("2006-01-02", period, a.c.Loc)
+			if startErr != nil || finishErr != nil || dayErr != nil {
+				continue // an unknown time does not prove the synth completed
+			}
+			if finished.Before(started) || started.Before(day.AddDate(0, 0, 1)) {
+				continue // an unfinished or inverted run is not the formal completion for this period
+			}
+		}
+		return true
 	}
 	return false
 }
