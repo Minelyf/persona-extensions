@@ -1,5 +1,28 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.20 (pre-release)
+
+- **Agent cursors cover trailing folds.** A day ending in `Fold[From..To]` resumes after `To`, so a folded Hub or
+  offline incremental read cannot refold new work into the previous day and skip it.
+
+## 0.2.0-beta.19 (pre-release)
+
+- **Reruns wait for completed days.** `rerun_range` no longer runs today or future dates. Premature or invalid
+  daily/synth records and stale rerun markers no longer block the formal daily recovery or post-rerun synthesis;
+  synthesis must follow the latest valid daily run.
+
+## 0.2.0-beta.18 (pre-release)
+
+- **Cancellation no longer drops correction issues.** After a successful gather, `signals.Run` checkpoints
+  `signals.json` on every later return. A later state save no longer loses those issues to cancellation alone. The
+  original cancellation and checkpoint errors remain visible; gather failures still leave partial cursors unsaved.
+
+## 0.2.0-beta.17 (pre-release)
+
+- **Mining failures are not successful digs.** A `signals_mine` error or malformed answer is recorded as `DecSkip`
+  with a bounded, redacted reason. The segment's read bytes stay counted, a valid empty answer stays `DecDig`, and
+  the existing terminal Dig ID and waiting-hub behavior are unchanged.
+
 ## 0.2.0-beta.16 (pre-release)
 
 - **Truncated assistant memory is not read as complete.** Files whose bodies the hub cut or omitted are skipped
