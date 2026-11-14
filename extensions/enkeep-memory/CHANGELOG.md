@@ -1,5 +1,10 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.20 (pre-release)
+
+- **Agent cursors cover trailing folds.** A day ending in `Fold[From..To]` resumes after `To`, so a folded Hub or
+  offline incremental read cannot refold new work into the previous day and skip it.
+
 ## 0.2.0-beta.19 (pre-release)
 
 - **Reruns wait for completed days.** `rerun_range` no longer runs today or future dates. Premature or invalid
