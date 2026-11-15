@@ -1,5 +1,21 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.22 (pre-release)
+
+Ready for a GPT model on the knowledge-base purpose (tried with gpt-6-luna).
+
+- **An observation without its sentence is not lost.** A model that fills a judgement's or a way's fields
+  (situation, choice, rejected, why; a machine's pitfall and fix) and leaves `text` out gets the sentence made of
+  those fields, nothing added. `text` is no longer required by the daily schema, so the hub does not refuse the
+  whole answer for it; an observation whose fields do not say enough is still a schema rejection. The prompt
+  (`daily/15`) says every observation has `text`, also when the fields are filled. On two replayed days gpt-6-luna
+  left `text` out of 35 of 172 answers.
+- **A reply that does not match the schema is read, not dropped.** When the hub returns `invalid_output` after its
+  second try, the reply it carries is taken and each item is checked on its own, as for any answer; before, the
+  whole unit was lost for the day.
+- **Room for a reasoning model.** The smallest answer limits (triage 400, weekly 1500, dig and rewrite 2000 tokens)
+  are 4000: a reasoning model counts its reasoning in `max_completion_tokens` and could be cut off before answering.
+
 ## 0.2.0-beta.21 (pre-release)
 
 - **A day the model is unavailable to is not done.** When the hub cannot run the model (model.complete busy or
