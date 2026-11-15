@@ -35,11 +35,21 @@ func DefaultRunner(ctx context.Context, m *Machine, script string, timeout time.
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// When the time is up only the shell is killed: a du or find it started still holds stdout, and Run would wait
+	// for it to finish (minutes on a large cache). WaitDelay closes the pipes and returns what was read by then.
+	cmd.WaitDelay = runnerWaitDelay
 	if err := cmd.Run(); err != nil {
 		return stdout.String(), runError(m, err, stderr.String())
 	}
 	return stdout.String(), nil
 }
+
+// runnerWaitDelay is how long a run waits, after its time is up and the shell was killed, for the programs the shell
+// started to let go of its output; tests shorten it.
+var runnerWaitDelay = 5 * time.Second
+
+// probeTimeout bounds one scan's probe script; tests shorten it.
+var probeTimeout = 90 * time.Second
 
 // runError words a failed run like the scan does: an SSH failure names the host.
 func runError(m *Machine, err error, stderr string) error {
@@ -575,14 +585,21 @@ func ScanMachine(ctx context.Context, runner Runner, st *State, m *Machine, now 
 	if runner == nil {
 		runner = DefaultRunner
 	}
-	out, err := runner(ctx, m, ProbeScript, 90*time.Second)
-	if err != nil {
-		m.Reachable = false
-		m.LastError = err.Error()
-		m.UpdatedAt = now
-		return nil, err
-	}
+	out, err := runner(ctx, m, ProbeScript, probeTimeout)
 	scan := ParseProbeOutput(m, out, now)
+	if err != nil {
+		// The probe reads the root volume first and sizes caches after it. On a computer with large caches the sizing
+		// can outlast the probe's time: the watermark it already read is kept, and the caches are marked partial. A
+		// probe that stopped before its df line was whole has no watermark (a cut line parses to no volume) and fails.
+		if scan.Mount.TotalBytes == 0 {
+			m.Reachable = false
+			m.LastError = err.Error()
+			m.UpdatedAt = now
+			return nil, err
+		}
+		scan.Partial = true
+		scan.PartialReason = err.Error()
+	}
 	m.Reachable = true
 	m.LastError = ""
 	if scan.Platform != "" {
@@ -597,7 +614,7 @@ func ScanMachine(ctx context.Context, runner Runner, st *State, m *Machine, now 
 		st.Scans = map[string]*Scan{}
 	}
 	st.Scans[m.ID] = scan
-	if scan.BinaryVersion != "" || scan.Sessions.CLIReady {
+	if !scan.Partial && (scan.BinaryVersion != "" || scan.Sessions.CLIReady) {
 		// Keep the local cold index current without pulling the index on every scan; a failed
 		// refresh only marks the cloud state unknown.
 		refreshColdIfStale(ctx, runner, st, m, now, coldScanRefreshAge)
