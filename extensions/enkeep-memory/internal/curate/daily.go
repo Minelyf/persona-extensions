@@ -264,7 +264,7 @@ func (c *Curator) aiTriage(ctx context.Context, m model.Model, u *Unit, d *triag
 		in.Lines = append(in.Lines, schema.MsgLine{N: l.N, Time: l.Time, Speaker: l.Speaker, Text: l.Body})
 	}
 	resp, err := m.Complete(ctx, model.Request{Step: "triage", Tier: tier(c.Cfg.DailyTier), System: prompts.Triage,
-		User: schema.Must(in), MaxTokens: 400, Schema: prompts.TriageSchema})
+		User: schema.Must(in), MaxTokens: 4000, Schema: prompts.TriageSchema})
 	if err != nil {
 		if errors.Is(err, model.ErrUnavailable) {
 			*down, *why = true, err
