@@ -24,8 +24,10 @@ class RealTest(unittest.TestCase):
         import larkx
         from larkx import media
         from larkx.proto import decoders
+        from larkx.proto import lark_all_pb2 as lark
         from larkx.proto import proto_pb2 as P
         cls.larkx, cls.media, cls.decoders, cls.P = larkx, media, decoders, P
+        cls.anchor = lark.entities.RichTextElement.AnchorProperty
 
     @classmethod
     def tearDownClass(cls):
@@ -99,7 +101,9 @@ class RealTest(unittest.TestCase):
         P, url = self.P, "https://example.feishu.cn/docx/AbC123"
         words = P.TextProperty()
         words.content = "请看一下 "
-        anchor = b"".join(bytes([n << 3 | 2, len(v)]) + v for n, v in ((1, url.encode()), (2, "示例文档".encode())))
+        anchor = self.anchor()  # LarkAgentX's own schema for the A element
+        anchor.href, anchor.content = url, "示例文档"
+        anchor = anchor.SerializeToString()
         tc = P.TextContent()
         tc.text = "请看一下 "
         for key, tag, prop in (("1", 1, words.SerializeToString()), ("2", 6, anchor)):
@@ -108,6 +112,13 @@ class RealTest(unittest.TestCase):
             element.tag, element.property = tag, prop
         m = self.normalized(self.frame([self.message("9005", 4, tc.SerializeToString())]))[0]
         self.assertEqual(m["text"], "请看一下 示例文档 " + url)
+
+    def test_the_link_fields_real_py_reads_are_larkagentxs(self):
+        # real.py reads an A element's href, content and textContent by number. LarkAgentX's proto.proto has no
+        # AnchorProperty; its lark_all_pb2 has entities.RichTextElement.AnchorProperty. A pin bump that moves them
+        # fails here.
+        fields = {f.name: f.number for f in self.anchor.DESCRIPTOR.fields}
+        self.assertEqual((fields["href"], fields["content"], fields["textContent"]), (1, 2, 3))
 
     def test_credentials_go_through_the_hub_and_never_a_file(self):
         from larkx_persona.real import RealBackend

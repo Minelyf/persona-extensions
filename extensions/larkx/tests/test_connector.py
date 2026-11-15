@@ -576,6 +576,18 @@ class NormalizeTest(unittest.TestCase):
         m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "看 ", "content_data": data}, self.key)
         self.assertEqual(m["text"], "看 ")
 
+    def test_a_link_that_renders_empty_keeps_larkagentxs_text(self):
+        # LarkAgentX falls back to its text when the rich text renders as nothing; so does the rebuild.
+        data = self.rich((6, self.prop((4, "x"))))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "原文", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "原文")
+
+    def test_a_repeated_link_field_reads_as_protobuf_reads_it(self):
+        # A non-repeated field written twice is its last value in protobuf.
+        data = self.rich((6, self.prop((1, "https://example.com/old"), (1, "https://example.com/new"))))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "https://example.com/new")
+
     def test_media(self):
         image = normalize({"msg_type_name": "IMAGE", "content_data": {"key": "k"}}, self.key)
         self.assertEqual(image["media"], [{"kind": "image", "key": "k"}])

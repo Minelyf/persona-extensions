@@ -58,7 +58,7 @@ def _fields(raw):
                 i += 4
             elif wire == 2:
                 size = varint()
-                out.setdefault(number, raw[i:i + size])
+                out[number] = raw[i:i + size]  # the last one wins, as protobuf reads a repeated scalar
                 i += size
             else:
                 break
@@ -81,7 +81,7 @@ def rich_text(rich):
     """A TEXT or POST message's rich text as LarkAgentX reads it (`extract_rich_text`), but with its links. LarkAgentX
     drops an A element whole, its title and its address: a pasted Feishu doc link reached Persona as the words around
     it (2026-11-12). A link is its title, a space and its address (the address alone when the title is it or empty).
-    None when the message has no link, so LarkAgentX's own text stays."""
+    None when the message has no link, so LarkAgentX's own text stays (and so does an empty result)."""
     try:
         dictionary = rich["elements"]["dictionary"]
     except (KeyError, TypeError):
@@ -107,7 +107,11 @@ def rich_text(rich):
         elif tag == _AT:
             piece = _string(prop, 2) or None  # AtProperty.content
         elif tag == _ANCHOR:
-            href, title = _string(prop, 1), _string(prop, 2) or _string(prop, 3)  # href, content, textContent
+            # AnchorProperty is not in LarkAgentX's proto.proto (only Tag.A = 6 and RichText.anchorIds = 7); its fields
+            # are LarkAgentX's lark_all_pb2 entities.RichTextElement.AnchorProperty at the pinned commit: href 1,
+            # content 2, textContent 3.
+            # tests/test_real.py checks them there; check again when the pin moves.
+            href, title = _string(prop, 1), _string(prop, 2) or _string(prop, 3)
             title = title.strip()
             piece = href if not title or title == href else ("%s %s" % (title, href) if href else title)
             if piece and text and not text[-1].isspace():
@@ -130,7 +134,7 @@ def normalize(msg, extract_key):
     text = msg.get("content") or ""
     if name in ("TEXT", "POST") and isinstance(data, dict):
         linked = rich_text(data.get("richText"))
-        if linked is not None:
+        if linked:  # an empty rebuild keeps LarkAgentX's text, as its own `extract_rich_text(...) or text` does
             text = ("[富文本] %s\n%s" % (data.get("title", ""), linked)).strip() if name == "POST" else linked
     media = []
     if name in ("IMAGE", "STICKER") and key:
