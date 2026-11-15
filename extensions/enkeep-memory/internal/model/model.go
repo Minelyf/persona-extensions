@@ -65,7 +65,9 @@ var ErrRefused = errors.New("model declined to answer")
 // "refused": "connection refused" is a network failure, worth retrying as it is.
 func refused(msg string) bool {
 	m := strings.ToLower(msg)
-	for _, w := range []string{"declined to answer", "refusal", "content_filter"} {
+	// "rejected as invalid": an OpenAI-style upstream turning a request down for what it contains, with a 400 and no
+	// reply (seen with a GPT model on a group chat); like a refusal, a smaller part may go through.
+	for _, w := range []string{"declined to answer", "refusal", "content_filter", "rejected as invalid"} {
 		if strings.Contains(m, w) {
 			return true
 		}
@@ -101,6 +103,8 @@ func (h Hub) Complete(ctx context.Context, r Request) (Response, error) {
 		case wire.ErrorCodeUnknownMethod, wire.ErrorCodeUnsupported, wire.ErrorCodePermissionDenied,
 			wire.ModelErrorCodeModelUnavailable, wire.ModelErrorCodeModelPaused, wire.ModelErrorCodeAssistantOffline:
 			return Response{}, fmt.Errorf("%w: %s", ErrUnavailable, e.Message)
+		case wire.ModelErrorCodeModelRefused: // a hub that names a refusal with its own code
+			return Response{}, fmt.Errorf("%w: %s", ErrRefused, e.Message)
 		case wire.ModelErrorCodeModelFailed:
 			if refused(e.Message) {
 				return Response{}, fmt.Errorf("%w: %s", ErrRefused, e.Message)
