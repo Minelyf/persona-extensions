@@ -27,50 +27,59 @@ func DefaultRunner(ctx context.Context, m *Machine, script string, timeout time.
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
-	if m == nil || m.IsLocal || isSelfHostAlias(m.Host) {
-		cmd = exec.CommandContext(cctx, "/bin/sh", "-s")
-	} else {
-		if !IsConcreteHost(m.Host) {
-			return "", fmt.Errorf("非法 SSH 主机名：%q", m.Host)
-		}
-		args := []string{
-			"-T",
-			"-o", "BatchMode=yes",
-			"-o", "ConnectTimeout=12",
-			"-o", "ServerAliveInterval=15",
-		}
-		if m.Port > 0 && m.Port != 22 {
-			args = append(args, "-p", strconv.Itoa(m.Port))
-		}
-		if m.IdentityFile != "" {
-			args = append(args, "-i", m.IdentityFile)
-		}
-		target := m.Host
-		if m.User != "" && !strings.Contains(target, "@") {
-			target = m.User + "@" + target
-		}
-		args = append(args, "--", target, "sh -s")
-		sshBin := resolveSSHBinary()
-		cmd = exec.CommandContext(cctx, sshBin, args...)
+	cmd, err := shellCommand(cctx, m, "sh -s", "-s")
+	if err != nil {
+		return "", err
 	}
-
 	cmd.Stdin = strings.NewReader(script)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		reason := lastNonEmptyLine(stderr.String())
-		if reason == "" {
-			reason = err.Error()
-		}
-		if m != nil && !m.IsLocal {
-			return stdout.String(), fmt.Errorf("SSH 连接 %s 失败：%s", m.Host, reason)
-		}
-		return stdout.String(), fmt.Errorf("本地探测命令执行失败：%s", reason)
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), runError(m, err, stderr.String())
 	}
 	return stdout.String(), nil
+}
+
+// runError words a failed run like the scan does: an SSH failure names the host.
+func runError(m *Machine, err error, stderr string) error {
+	reason := lastNonEmptyLine(stderr)
+	if reason == "" {
+		reason = err.Error()
+	}
+	if m != nil && !m.IsLocal {
+		return fmt.Errorf("SSH 连接 %s 失败：%s", m.Host, reason)
+	}
+	return fmt.Errorf("本地探测命令执行失败：%s", reason)
+}
+
+// shellCommand runs /bin/sh with localArgs on this machine, or remote (the command line the
+// remote login shell runs) over OpenSSH with BatchMode=yes.
+func shellCommand(ctx context.Context, m *Machine, remote string, localArgs ...string) (*exec.Cmd, error) {
+	if m == nil || m.IsLocal || isSelfHostAlias(m.Host) {
+		return exec.CommandContext(ctx, "/bin/sh", localArgs...), nil
+	}
+	if !IsConcreteHost(m.Host) {
+		return nil, fmt.Errorf("非法 SSH 主机名：%q", m.Host)
+	}
+	args := []string{
+		"-T",
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=12",
+		"-o", "ServerAliveInterval=15",
+	}
+	if m.Port > 0 && m.Port != 22 {
+		args = append(args, "-p", strconv.Itoa(m.Port))
+	}
+	if m.IdentityFile != "" {
+		args = append(args, "-i", m.IdentityFile)
+	}
+	target := m.Host
+	if m.User != "" && !strings.Contains(target, "@") {
+		target = m.User + "@" + target
+	}
+	args = append(args, "--", target, remote)
+	return exec.CommandContext(ctx, resolveSSHBinary(), args...), nil
 }
 
 func resolveSSHBinary() string {
@@ -118,12 +127,9 @@ hostname 2>/dev/null || uname -n 2>/dev/null || echo "machine"
 echo "@@SECTION:HOME"
 printf '%s\n' "$HOME"
 echo "@@SECTION:BIN_VERSION"
-if command -v disklessly >/dev/null 2>&1; then
-  disklessly version 2>/dev/null | head -n 1 || true
-elif [ -x "$HOME/.disklessly/bin/disklessly" ]; then
-  "$HOME/.disklessly/bin/disklessly" version 2>/dev/null | head -n 1 || true
-elif [ -x "/Applications/Disklessly.app/Contents/MacOS/disklessly" ]; then
-  "/Applications/Disklessly.app/Contents/MacOS/disklessly" version 2>/dev/null | head -n 1 || true
+` + resolveCLIScript + `
+if [ -n "$DKL" ]; then
+  "$DKL" version 2>/dev/null | head -n 1 || true
 fi
 echo "@@SECTION:DF"
 if [ -d "/System/Volumes/Data" ]; then

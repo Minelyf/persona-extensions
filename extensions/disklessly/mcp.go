@@ -83,7 +83,7 @@ var tools = []tool{
 			"machine": str("只看这台机器；不填返回全部机器"),
 			"refresh": map[string]any{"type": "boolean", "description": "若为 true，先在机器上重新读取 disklessly 会话索引并检查备份后端与归档分段"},
 		},
-		description: "查看各机器冷会话云端备份状态：备份后端是否可达、最近检查时间、已索引会话数、按位置（在云端 / 未知 / 云端缺失 / 本地）统计、缺失或未确认的归档分段。",
+		description: "查看各机器冷会话云端备份状态：每台机器的状态 state（ready 正常、no_cli 未安装 CLI、cli_too_old CLI 版本过旧、no_backend 未设置备份后端、backend_unreachable 备份后端连不上、unreachable 连不上这台电脑、unreadable 回答无法识别、unchecked 尚未检查）与原因、备份后端是否可达、最近检查时间、已索引会话数、按位置（在云端 / 未知 / 云端缺失 / 本地）统计、缺失或未确认的归档分段。",
 	},
 	{
 		name:     "disklessly_clean",
@@ -629,7 +629,10 @@ func (m *mcpServer) call(ctx context.Context, name string, raw json.RawMessage) 
 // coldStatusOf summarizes machine mach's cold index for the assistant (without the entries).
 func coldStatusOf(st *State, mach *Machine, now time.Time) map[string]any {
 	cat := st.cold(mach.ID)
-	res := map[string]any{"machine_id": mach.ID, "machine_name": cmp.Or(mach.Name, mach.Host)}
+	res := map[string]any{"machine_id": mach.ID, "machine_name": machineLabel(mach)}
+	state := cat.stateCode()
+	res["state"] = state
+	res["state_label"] = coldStateLabel(state)
 	if cat == nil {
 		res["checked"] = false
 		res["note"] = "尚未读取云端索引（disklessly_sessions_status refresh=true 或扫描机器）"
@@ -652,6 +655,18 @@ func coldStatusOf(st *State, mach *Machine, now time.Time) map[string]any {
 	res["archived_bytes"] = cat.ArchivedBytes
 	if cat.Error != "" {
 		res["error"] = cat.Error
+	}
+	if cat.Cause != "" {
+		res["cause"] = cat.Cause
+	}
+	if cat.Detail != "" {
+		res["detail"] = cat.Detail
+	}
+	if cat.CLI.Version != "" {
+		res["cli_version"] = cat.CLI.Version
+	}
+	if cat.Platform != "" {
+		res["platform"] = cat.Platform
 	}
 	return res
 }
