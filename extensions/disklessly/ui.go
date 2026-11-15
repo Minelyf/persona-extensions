@@ -235,6 +235,9 @@ func (d draw) fleetTab(p page, statuses []MachineStatus, selected *Machine) []wi
 		}
 		if ms.LastScannedAt != nil {
 			subParts = append(subParts, "扫描于 "+d.when(*ms.LastScannedAt))
+			if ms.Partial {
+				subParts = append(subParts, "缓存未统计完（探测超时，水位照常）")
+			}
 		} else {
 			subParts = append(subParts, "尚未扫描")
 		}
@@ -893,6 +896,10 @@ func (a *app) card(_ context.Context, _ *ext.UIRequest) (*wire.View, error) {
 			if ms.TotalBytes > 0 {
 				sub = fmt.Sprintf("已用 %.0f%%（可用 %s）· 可释放 %s",
 					ms.UsedPercent, FormatBytes(ms.AvailableBytes), FormatBytes(ms.ReclaimableBytes))
+				if ms.Partial {
+					sub = fmt.Sprintf("已用 %.0f%%（可用 %s）· 缓存未统计完",
+						ms.UsedPercent, FormatBytes(ms.AvailableBytes))
+				}
 			} else if ms.Machine.LastError != "" {
 				sub = "离线：" + clip(ms.Machine.LastError, 40)
 			}
