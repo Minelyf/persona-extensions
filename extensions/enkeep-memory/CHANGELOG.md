@@ -1,5 +1,12 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.25 (pre-release)
+
+- **A unit an upstream turns down is split, not lost.** An OpenAI-style upstream answers some requests with HTTP 400
+  "the request was rejected as invalid" for what they contain (seen with a GPT model on a group chat: the whole unit
+  was lost for the day). That reply, and the hub's `model_refused` code, now count as a refusal: the unit is read
+  again in smaller parts, and a part refused at the smallest size is recorded as skipped, as for any refusal.
+
 ## 0.2.0-beta.24 (pre-release)
 
 - **People pages carry the user's own words and the inferred profile too.** The hub's privacy filter
