@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/convsrc"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/hubapi"
@@ -29,6 +30,7 @@ type app struct {
 	hub       *ext.Hub
 	running   string // the run in progress, if any
 	lastErr   string
+	paused    []string     // a.tried keys of passes that found the model unavailable: tried again after the pause
 	tried     []string     // days a daily run started since this process did
 	member    bool         // a member hub of a group: the curator runs only on the centre
 	changed   int          // kb.changed events since start
@@ -136,6 +138,13 @@ func (a *app) tick(ctx context.Context) {
 	}
 	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 	a.releaseProfiles(ctx)
+	// The model was unavailable to the last pass: nothing that needs it starts before the next try (State.ModelPause).
+	// Then the day that could not run is tried again: by the replay from where it stopped, by rerun_range or the
+	// daily pass as their own rules say.
+	if _, wait := c.ModelWait(nowFn()); wait {
+		return
+	}
+	a.retryAfterPause()
 	// The first-run replay of the history (4.1) goes first, a day at a time, oldest first; a day that failed is
 	// tried again on the next start.
 	c.StartBackfill(now.Format("2006-01-02"))
@@ -243,6 +252,29 @@ func (a *app) synthAfterDaily(day string) bool {
 	return false
 }
 
+// triedKey is the a.tried key of a pass.
+func triedKey(kind, period string) string {
+	switch kind {
+	case "daily":
+		return period
+	case "synth", "backfill":
+		return kind + "@" + period
+	}
+	return kind + " " + period
+}
+
+// retryAfterPause forgets, once the pause is over, that the passes the model was unavailable to were tried: the
+// tick starts them again.
+func (a *app) retryAfterPause() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.paused) == 0 {
+		return
+	}
+	a.tried = slices.DeleteFunc(a.tried, func(k string) bool { return slices.Contains(a.paused, k) })
+	a.paused = nil
+}
+
 // attempted says whether a daily run of the day already started since this process did: a rerun that failed is
 // not retried every minute, the next start (or a change of settings) tries again.
 func (a *app) attempted(day string) bool {
@@ -325,6 +357,9 @@ func (a *app) start(ctx context.Context, kind, period string) bool {
 		a.mu.Lock()
 		a.running = ""
 		a.lastErr = ""
+		if errors.Is(err, curate.ErrModelDown) {
+			a.paused = append(a.paused, triedKey(kind, period)) // tried again after the pause, not only at the next start
+		}
 		if err != nil {
 			a.lastErr = kind + " " + period + "：" + err.Error()
 			log.Printf("enkeep-memory %s %s: %v", kind, period, err)

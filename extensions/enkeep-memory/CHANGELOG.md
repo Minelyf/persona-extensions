@@ -1,5 +1,20 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.21 (pre-release)
+
+- **A day the model is unavailable to is not done.** When the hub cannot run the model (model.complete busy or
+  unavailable) before every admitted unit of a day was read, the day's pass ends with `ErrModelDown` instead of
+  finishing on triage alone: no finished run is recorded, the first-run replay stays on that day, and a rerun_range
+  day is not marked rerun. What was read before is kept (the state is saved after every unit). The passes then wait
+  (`model_pause` in the state) 10 minutes, doubling up to 2 hours, and try the same day again; the first pass that
+  reaches the model clears the pause and the replay goes on from there. Before, a replay ran on through days with
+  no model and counted them as read.
+- The plugin page says so: "模型暂时不可用" for the first failures, "模型不可用，暂停中" after three in a row, with
+  the hub's reason, since when, the next try and the day it resumes from.
+- A hub with no model configured for the extension still triages and checks without one, as before.
+- Offline replay: a gateway's 429 (no capacity) through `-pi` counts as the model unavailable, so a replay stops on
+  that day instead of reading on without the model.
+
 ## 0.2.0-beta.20 (pre-release)
 
 - **Agent cursors cover trailing folds.** A day ending in `Fold[From..To]` resumes after `To`, so a folded Hub or
