@@ -1,5 +1,15 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.24 (pre-release)
+
+- **People pages carry the user's own words and the inferred profile too.** The hub's privacy filter
+  (nwverse/persona#6119) keeps a profile's private parts (`[用户原话]`, `[推断·仅供参考]`) out of conversations that
+  write to other people: inbox drafting, the Lark agent and conversations an extension opens. With it, an accepted
+  person card writes its evaluations and inferences to the knowledge base as well, not only facts and commitments
+  (`ProfileViewsReleased`). `engines.persona` asks for a hub built with the filter (`>=202611122324`); a development
+  build (0) is not checked. Not covered by the hub's filter, as #6119 says: a conversation reading `profiles.json`
+  with its own file tools, an extension's own MCP tools, and paraphrases.
+
 ## 0.2.0-beta.22 (pre-release)
 
 Ready for a GPT model on the knowledge-base purpose (tried with gpt-6-luna).

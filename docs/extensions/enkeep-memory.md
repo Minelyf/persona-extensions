@@ -48,8 +48,10 @@ anything for the assistant. A source you do not have is shown as missing on the 
   check page can stop a source from teaching people and relations.
 - People cards keep facts, your own words, inferences (always labelled, with their basis) and commitments apart.
   Evaluations and inferences never go into a draft sent to someone: the inbox gets only a communication tip, and the
-  lines a draft must never repeat. Until your hub filters people profiles for the inbox and agents that write for
-  you, only facts and commitments are written to people pages; evaluations and inferences stay on the plugin page.
+  lines a draft must never repeat. People pages carry all four parts; the hub keeps evaluations and inferences out
+  of the conversations that write to other people for you (inbox drafting, the Lark agent, conversations an
+  extension opens), so this version needs a hub with that filter. The filter does not cover a conversation reading
+  the profile file with its own file tools, an extension's own tools, or a paraphrase.
 - Credentials, tokens and connection strings are never extracted.
 - Everything stays in your own hub: the extension's data directory and your knowledge base.
 
