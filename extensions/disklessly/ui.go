@@ -44,6 +44,8 @@ type draw struct {
 	now  time.Time
 	loc  *time.Location
 	deep *deepResult // a deep search's hits for this render only
+	// jobs are the background cold-session jobs by machine id, as of this render.
+	jobs map[string]coldJob
 }
 
 func (a *app) render(_ context.Context, r *ext.UIRequest) (*wire.View, error) {
@@ -69,7 +71,7 @@ func (a *app) drawer(st *State, r *ext.UIRequest) draw {
 	if err != nil {
 		loc = time.UTC
 	}
-	return draw{st: st, now: a.now(), loc: loc}
+	return draw{st: st, now: a.now(), loc: loc, jobs: a.jobSnapshot()}
 }
 
 func (d draw) view(p page) *wire.View {
@@ -105,10 +107,7 @@ func (d draw) home(p page) *wire.View {
 	v := &wire.View{Title: "Disklessly 机器磁盘"}
 	choices := make([]wire.Choice, 0, len(statuses)+1)
 	for _, ms := range statuses {
-		label := ms.Machine.Host
-		if ms.Machine.IsLocal {
-			label = "local (本机)"
-		}
+		label := machineLabel(ms.Machine)
 		if ms.TotalBytes > 0 {
 			label = fmt.Sprintf("%s · %.0f%%", label, ms.UsedPercent)
 		}
@@ -157,6 +156,7 @@ func (d draw) home(p page) *wire.View {
 	case tabSessions:
 		v.Search = &wire.Search{Placeholder: coldSearchHint, Value: clipQuery(p.SessQuery), Action: wire.Action{ID: "cold-search"}}
 		v.Sections = d.sessionsAndHistoryTab(p, selected, scan)
+		v.RefreshAfter = d.refreshAfter()
 	default:
 		v.Sections = d.fleetTab(p, statuses, selected)
 	}
@@ -964,7 +964,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if deep, err = a.coldDeep(ctx, cmp.Or(r.Values["m"], p.Machine), p.SessQuery); err != nil {
 			return nil, &ext.Error{Code: "invalid", Message: err.Error()}
 		}
-	case "cold-refresh", "cold-offload", "cold-restore", "archive-sessions":
+	case "cold-refresh", "cold-offload", "cold-restore", "archive-sessions", "cold-install":
 		p.Machine = cmp.Or(r.Values["m"], p.Machine)
 		p.Tab = tabSessions
 		toast, err := a.coldAction(ctx, r.Action, p.Machine, r.Values["id"])

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -79,10 +80,22 @@ func (d draw) coldSections(m *Machine, query string, deep *deepResult) []wire.Se
 	var total, indexed int
 	var capped bool
 	var lastCheck time.Time
-	var backends []string
-	var problems []string
+	byState := map[string]int{}
+	var reading []string
+	type machineRow struct {
+		m     *Machine
+		cat   *ColdCatalog
+		state string
+	}
+	var rows []machineRow
 	for _, mm := range machines {
 		cat := d.st.cold(mm.ID)
+		state := cat.stateCode()
+		byState[state]++
+		rows = append(rows, machineRow{mm, cat, state})
+		if j, ok := d.jobs[mm.ID]; ok && j.running() {
+			reading = append(reading, machineLabel(mm))
+		}
 		if cat == nil {
 			continue
 		}
@@ -95,35 +108,26 @@ func (d draw) coldSections(m *Machine, query string, deep *deepResult) []wire.Se
 		for _, e := range cat.Entries {
 			counts[cat.location(e, mm, d.now)]++
 		}
-		name := cmp.Or(mm.Name, mm.ID)
-		switch b := cat.Backend; {
-		case b.Reachable == nil:
-			backends = append(backends, name+" 未知")
-		case *b.Reachable:
-			backends = append(backends, fmt.Sprintf("%s 可达 %d ms", name, b.LatencyMs))
-		default:
-			backends = append(backends, name+" 不可达")
-			problems = append(problems, fmt.Sprintf("%s：备份后端不可达（%s），云端位置显示为未知。", name, cmpOr(b.Error, "backend unreachable")))
-		}
-		if cat.Error != "" {
-			problems = append(problems, name+"："+cat.Error)
-		}
-		if len(cat.Missing) > 0 {
-			problems = append(problems, fmt.Sprintf("%s：备份后端缺少 %d 个归档分段，相关会话无法恢复。", name, len(cat.Missing)))
-		}
-		if len(cat.Unchecked) > 0 || cat.TimedOut {
-			problems = append(problems, fmt.Sprintf("%s：%d 个归档分段未能确认，相关会话显示为未知。", name, len(cat.Unchecked)))
+	}
+	slices.SortStableFunc(rows, func(a, b machineRow) int { return cmp.Compare(coldStateRank(a.state), coldStateRank(b.state)) })
+
+	// The summary counts machines by state ("2 正常 · 2 未安装 CLI · 1 CLI 版本过旧"), worst first.
+	var states []string
+	for s := range byState {
+		states = append(states, s)
+	}
+	slices.SortFunc(states, func(a, b string) int { return cmp.Compare(coldStateRank(a), coldStateRank(b)) })
+	var parts []string
+	worst := wire.TonePositive
+	for _, s := range states {
+		parts = append(parts, fmt.Sprintf("%d %s", byState[s], coldStateLabel(s)))
+		if t := coldStateTone(s); t == wire.ToneDanger || (t == wire.ToneCaution && worst == wire.TonePositive) {
+			worst = t
 		}
 	}
-
-	backendStat := wire.Stat{Label: "备份后端", Value: "未检查", Detail: "刷新云端索引后显示", Tone: wire.ToneCaution}
-	if len(backends) > 0 {
-		backendStat = wire.Stat{Label: "备份后端", Value: fmt.Sprintf("%d 台机器", len(backends)), Detail: clip(strings.Join(backends, "；"), 80)}
-		if counts[LocUnknown] == 0 && !strings.Contains(backendStat.Detail, "不可达") && !strings.Contains(backendStat.Detail, "未知") {
-			backendStat.Tone = wire.TonePositive
-		} else {
-			backendStat.Tone = wire.ToneCaution
-		}
+	machineStat := wire.Stat{Label: "机器", Value: fmt.Sprintf("%d 台", len(machines)), Detail: strings.Join(parts, " · "), Tone: worst}
+	if len(reading) > 0 {
+		machineStat.Detail = fmt.Sprintf("正在读取 %d 台 · %s", len(reading), machineStat.Detail)
 	}
 	checked := "从未"
 	if !lastCheck.IsZero() {
@@ -143,12 +147,13 @@ func (d draw) coldSections(m *Machine, query string, deep *deepResult) []wire.Se
 				{Label: LocCloud, Value: fmt.Sprintf("%d 个", counts[LocCloud]), Tone: toneIf(counts[LocCloud] > 0, wire.TonePositive)},
 				{Label: "未知 / 云端缺失", Value: fmt.Sprintf("%d / %d", counts[LocUnknown], counts[LocMissing]),
 					Tone: cmp.Or(toneIf(counts[LocMissing] > 0, wire.ToneDanger), toneIf(counts[LocUnknown] > 0, wire.ToneCaution))},
-				backendStat,
+				machineStat,
 			},
 		}},
 	}
-	for _, t := range problems[:min(len(problems), 4)] {
-		status.Items = append(status.Items, wire.Component{Type: wire.ComponentText, Style: wire.TextStyleSecondary, Text: clip(t, 200)})
+	if len(reading) > 0 {
+		status.Items = append(status.Items, wire.Component{Type: wire.ComponentText, Style: wire.TextStyleSecondary,
+			Text: clip("正在后台读取："+strings.Join(reading, "、")+"。完成后页面自动更新。", 200)})
 	}
 	if m != nil {
 		status.Items = append(status.Items, wire.Component{
@@ -166,6 +171,11 @@ func (d draw) coldSections(m *Machine, query string, deep *deepResult) []wire.Se
 			Type: wire.ComponentButton, Title: coldDeepText,
 			Action: &wire.Action{ID: "cold-deep", Values: map[string]string{"m": machineArg, "q": query}},
 		})
+	}
+
+	machineSec := wire.Section{Key: "cold-machines", Title: "各机器状态"}
+	for _, r := range rows {
+		machineSec.Items = append(machineSec.Items, d.machineStateItems(r.m, r.cat, r.state)...)
 	}
 
 	var hits []ColdHit
@@ -204,7 +214,150 @@ func (d draw) coldSections(m *Machine, query string, deep *deepResult) []wire.Se
 		}
 		results.Items = append(results.Items, wire.Component{Type: wire.ComponentEmpty, Icon: "chat", Title: "没有会话", Detail: detail})
 	}
-	return []wire.Section{status, results}
+	if len(machineSec.Items) == 0 {
+		return []wire.Section{status, results}
+	}
+	return []wire.Section{status, machineSec, results}
+}
+
+// refreshAfter asks the app to draw the page again while a background job runs (hubs that do
+// not take ui.invalidate still redraw); 0 otherwise.
+func (d draw) refreshAfter() int {
+	for _, j := range d.jobs {
+		if j.running() {
+			return coldPollSeconds
+		}
+	}
+	return 0
+}
+
+// coldPollSeconds is the redraw interval while a job runs (the view schema's minimum).
+const coldPollSeconds = 30
+
+// machineStateItems draws one machine's row (name, state, cause) and the actions that fix it.
+func (d draw) machineStateItems(m *Machine, cat *ColdCatalog, state string) []wire.Component {
+	name := machineLabel(m)
+	row := wire.Component{
+		Type:  wire.ComponentRow,
+		Key:   "mach-" + m.ID,
+		Icon:  "gauge",
+		Title: name,
+		Badge: &wire.Badge{Text: coldStateLabel(state), Tone: coldStateTone(state)},
+	}
+	var sub []string
+	if p := cmp.Or(catPlatform(cat), m.Platform); p != "" {
+		sub = append(sub, p)
+	}
+	if cat != nil && cat.CLI.Version != "" {
+		sub = append(sub, "disklessly "+shortVersion(cat.CLI.Version))
+	}
+	if cat != nil && !cat.CheckedAt.IsZero() {
+		sub = append(sub, d.when(cat.CheckedAt)+"检查")
+	} else if cat != nil && !cat.RefreshedAt.IsZero() {
+		sub = append(sub, d.when(cat.RefreshedAt)+"检查")
+	}
+	row.Subtitle = strings.Join(sub, " · ")
+
+	errText := ""
+	if cat != nil {
+		errText = cat.Error
+	}
+	refresh := func(title string) wire.Component {
+		return wire.Component{Type: wire.ComponentButton, Title: title + " " + name,
+			Action: &wire.Action{ID: "cold-refresh", Values: map[string]string{"m": m.ID}}}
+	}
+	var actions []wire.Component
+	switch state {
+	case ColdReady:
+		n, cloud, missing := 0, 0, 0
+		for _, e := range cat.Entries {
+			n++
+			switch cat.location(e, m, d.now) {
+			case LocCloud:
+				cloud++
+			case LocMissing:
+				missing++
+			}
+		}
+		b := cat.Backend
+		row.Detail = fmt.Sprintf("已索引 %d 个 · 在云端 %d 个 · 云端缺失 %d 个 · 备份后端 %s 可达（%d ms）",
+			n, cloud, missing, cmp.Or(b.ID, b.Type, "backend"), b.LatencyMs)
+		if len(cat.Missing) > 0 {
+			row.Detail += fmt.Sprintf("；备份后端缺少 %d 个归档分段，相关会话无法恢复", len(cat.Missing))
+		}
+		if len(cat.Unchecked) > 0 || cat.TimedOut {
+			row.Detail += fmt.Sprintf("；%d 个归档分段未能确认", len(cat.Unchecked))
+		}
+		actions = append(actions, refresh("刷新"))
+	case ColdNoCLI, ColdCLIOld:
+		if state == ColdNoCLI {
+			row.Detail = "这台电脑上没有 disklessly CLI，会话备份在这里没有开启。"
+		} else {
+			row.Detail = cliOldMessage(cat, m) + "。"
+		}
+		offer := installSourceFor(d.st, m)
+		if offer.src != nil {
+			row.Detail += fmt.Sprintf("可以从 %s 复制安装 disklessly %s。", machineLabel(offer.src), shortVersion(offer.cli.Version))
+			actions = append(actions, wire.Component{Type: wire.ComponentButton, Title: "从 " + machineLabel(offer.src) + " 复制安装",
+				Action: &wire.Action{ID: "cold-install", Values: map[string]string{"m": m.ID, "id": offer.src.ID}, Confirm: installConfirm(offer, m)}})
+		} else {
+			row.Detail += offer.reason + "。"
+		}
+		actions = append(actions, wire.Component{Type: wire.ComponentLink, Title: "如何安装 disklessly CLI", URL: coldInstallDocsURL})
+		actions = append(actions, refresh("重新检查"))
+	case ColdNoBackend:
+		row.Detail = "这台电脑上的 disklessly 还没有设置备份后端，冷会话不会上传。在这台电脑上为 disklessly 设置备份后端后点「重新检查」。"
+		if cat.Detail != "" {
+			row.Detail += "disklessly 的提示：" + cat.Detail
+		}
+		actions = append(actions, refresh("重新检查"))
+	case ColdBackendDown:
+		b := cat.Backend
+		row.Detail = fmt.Sprintf("备份后端 %s 连不上：%s（%d ms），云端位置显示为未知。", cmp.Or(b.ID, b.Type, "backend"), cmpOr(b.Error, "backend unreachable"), b.LatencyMs)
+		actions = append(actions, refresh("重新检查"))
+	case ColdOffline:
+		row.Detail = sshCauseText(cat.Cause) + "：" + errText
+		actions = append(actions, refresh("重试"))
+	case ColdUnreadable:
+		row.Detail = cmpOr(errText, "disklessly 的回答无法识别")
+		if cat.Detail != "" {
+			row.Detail += "。它输出的第一行：" + cat.Detail
+		}
+		actions = append(actions, refresh("重试"))
+	default:
+		row.Detail = "还没有读取过这台电脑的会话索引。"
+		actions = append(actions, refresh("读取"))
+	}
+	row.Detail = clip(row.Detail, 400)
+
+	items := []wire.Component{row}
+	if j, ok := d.jobs[m.ID]; ok {
+		if j.running() {
+			row.Badge = &wire.Badge{Text: "进行中", Tone: wire.ToneNeutral}
+			items[0] = row
+			items = append(items, wire.Component{Type: wire.ComponentText, Style: wire.TextStyleSecondary,
+				Text: fmt.Sprintf("%s…（%s开始）", j.Label, d.when(j.Started))})
+			return items // no actions while it runs: a second start would be refused anyway
+		}
+		if j.Kind != jobRefresh {
+			text := j.Note
+			if j.Err != "" {
+				text = "失败：" + j.Err
+			}
+			if text != "" {
+				items = append(items, wire.Component{Type: wire.ComponentText, Style: wire.TextStyleSecondary,
+					Text: clip(fmt.Sprintf("%s · %s", d.when(j.Finished), text), 300)})
+			}
+		}
+	}
+	return append(items, actions...)
+}
+
+func catPlatform(c *ColdCatalog) string {
+	if c == nil {
+		return ""
+	}
+	return c.Platform
 }
 
 func (d draw) coldRow(h ColdHit) wire.Component {
@@ -250,79 +403,11 @@ func lastPathElem(p string) string {
 	return p
 }
 
-// coldAction runs a cold-session action that changes state. machine "" or "all" means every machine.
-func (a *app) coldAction(ctx context.Context, action, machine, id string) (string, error) {
-	runner := a.run()
-	var toast string
-	err := a.db().update(func(st *State, now time.Time) error {
-		pick := func() (*Machine, error) {
-			m := st.machine(cmp.Or(machine, "local"))
-			if m == nil || machine == allMachines {
-				return nil, fmt.Errorf("找不到机器 %q", machine)
-			}
-			return m, nil
-		}
-		switch action {
-		case "cold-refresh":
-			var ms []*Machine
-			if machine == "" || machine == allMachines {
-				for _, m := range st.Machines {
-					if m.Enabled {
-						ms = append(ms, m)
-					}
-				}
-			} else if m, err := pick(); err != nil {
-				return err
-			} else {
-				ms = []*Machine{m}
-			}
-			var ok, n int
-			var errs []string
-			for _, m := range ms {
-				cat, err := RefreshColdIndex(ctx, runner, st, m, now)
-				if err != nil {
-					errs = append(errs, cmp.Or(m.Name, m.ID)+"："+err.Error())
-					continue
-				}
-				ok++
-				n += len(cat.Entries)
-			}
-			toast = fmt.Sprintf("已刷新 %d 台机器的云端索引（%d 个会话）", ok, n)
-			if len(errs) > 0 {
-				toast += "；" + clip(strings.Join(errs, "；"), 120)
-			}
-		case "cold-offload", "archive-sessions":
-			m, err := pick()
-			if err != nil {
-				return err
-			}
-			_, rec, err := OffloadSessions(ctx, runner, st, m, false, nil, now)
-			if err != nil {
-				return err
-			}
-			toast = "冷会话已上云：" + rec.Summary
-		case "cold-restore":
-			m, err := pick()
-			if err != nil {
-				return err
-			}
-			e, hint, err := RestoreCold(ctx, runner, st, m, id, now)
-			if err != nil {
-				return err
-			}
-			toast = "已恢复到 " + e.Path
-			if hint != "" {
-				toast += "，可运行 " + hint
-			}
-		default:
-			return fmt.Errorf("unknown action %q", action)
-		}
-		return nil
-	})
-	return toast, err
-}
+// coldUIBudget bounds a deep search run inside a UI request (the hub allows about 12 seconds).
+const coldUIBudget = 8 * time.Second
 
-// coldDeep runs a deep search; it reads the state only.
+// coldDeep runs a deep search on the machines in parallel, within coldUIBudget and without
+// holding the store lock while they answer.
 func (a *app) coldDeep(ctx context.Context, machine, query string) (*deepResult, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("请输入要全文搜索的内容")
@@ -331,9 +416,22 @@ func (a *app) coldDeep(ctx context.Context, machine, query string) (*deepResult,
 		machine = ""
 	}
 	runner := a.run()
+	var ms []*Machine
+	if err := a.db().read(func(st *State) {
+		for _, m := range deepTargets(st, machine) {
+			mc := *m
+			ms = append(ms, &mc)
+		}
+	}); err != nil {
+		return nil, err
+	}
+	var runs map[string]deepRun
+	if words := deepSearchWords(query); len(words) > 0 {
+		runs = deepSearchMachines(ctx, runner, ms, words, coldShown, coldUIBudget)
+	}
 	var res deepResult
 	err := a.db().read(func(st *State) {
-		res.hits, res.errs = DeepSearchCold(ctx, runner, st, query, machine, coldShown, a.now())
+		res.hits, res.errs = mergeDeepSearch(st, query, machine, coldShown, a.now(), runs)
 	})
 	return &res, err
 }
@@ -364,7 +462,7 @@ func (d draw) sessionsPage(p sessPage, deep *deepResult) *wire.View {
 	choices := []wire.Choice{{Value: allMachines, Title: "全部机器"}}
 	for _, mm := range d.st.Machines {
 		if mm.Enabled {
-			choices = append(choices, wire.Choice{Value: mm.ID, Title: clip(cmp.Or(mm.Name, mm.Host), 28)})
+			choices = append(choices, wire.Choice{Value: mm.ID, Title: clip(machineLabel(mm), 28)})
 		}
 	}
 	value := allMachines
@@ -372,11 +470,12 @@ func (d draw) sessionsPage(p sessPage, deep *deepResult) *wire.View {
 		value = m.ID
 	}
 	return &wire.View{
-		Title:    "Agent 对话",
-		State:    ext.EncodeState(p),
-		Search:   &wire.Search{Placeholder: coldSearchHint, Value: clipQuery(p.Query), Action: wire.Action{ID: "search"}},
-		Filter:   &wire.Filter{Name: "machine", Title: "机器", Choices: choices, Value: value, Action: wire.Action{ID: "machine"}},
-		Sections: d.coldSections(m, p.Query, deep),
+		Title:        "Agent 对话",
+		State:        ext.EncodeState(p),
+		RefreshAfter: d.refreshAfter(),
+		Search:       &wire.Search{Placeholder: coldSearchHint, Value: clipQuery(p.Query), Action: wire.Action{ID: "search"}},
+		Filter:       &wire.Filter{Name: "machine", Title: "机器", Choices: choices, Value: value, Action: wire.Action{ID: "machine"}},
+		Sections:     d.coldSections(m, p.Query, deep),
 	}
 }
 
