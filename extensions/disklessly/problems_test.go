@@ -57,6 +57,8 @@ func TestSSHProblems(t *testing.T) {
 		{name: "host key", raw: "SSH 连接 mm-2 失败：Host key verification failed.", cause: causeHostKey, reason: "指纹", command: "ssh dev@mm-2", wantRetry: true},
 		{name: "refused", raw: "SSH 连接 mm-2 失败：ssh: connect to host mm-2 port 22: Connection refused", cause: causeRefused, reason: "拒绝了连接", wantRetry: true, wantEditor: true},
 		{name: "dns", raw: "SSH 连接 mm-2 失败：ssh: Could not resolve hostname mm-2: Name or service not known", cause: causeDNS, reason: "找不到", command: "ssh -G mm-2", wantRetry: true, wantEditor: true},
+		// The machine is a port forward on the hub, and nothing listens there.
+		{name: "tunnel down", raw: "SSH 连接 mm-2 失败：ssh: connect to host 127.0.0.1 port 2222: Connection refused", cause: causeRefused, reason: "127.0.0.1:2222", command: "ssh -o BatchMode=yes", wantRetry: true},
 		{name: "network", raw: "SSH 连接 mm-2 失败：ssh: connect to host mm-2 port 22: No route to host", cause: causeNetwork, reason: "网络不通", wantRetry: true},
 		// The hub's own OpenSSH config is unreadable: outside a sandbox that is a file to fix on the hub.
 		{name: "hub ssh config", raw: "SSH 连接 mm-2 失败：Bad owner or permissions on /etc/ssh/ssh_config.d/50-redhat.conf", cause: causeSSHConfig, reason: "/etc/ssh/ssh_config.d/50-redhat.conf", command: "sudo chmod 644 /etc/ssh/ssh_config.d/50-redhat.conf", wantRetry: true},
@@ -93,6 +95,14 @@ func TestSSHProblems(t *testing.T) {
 				t.Fatalf("retry %v edit %v", p.Retry, p.Edit)
 			}
 		})
+	}
+	// A copyable command keeps ~/ expandable.
+	if got := sshTarget(&Machine{Host: "muse", User: "root", Port: 2222, IdentityFile: "~/.ssh/id_ed25519"}); got != "-p 2222 -i ~/'.ssh/id_ed25519' root@muse" && got != "-p 2222 -i ~/.ssh/id_ed25519 root@muse" {
+		t.Fatalf("target %q", got)
+	}
+	// A refused connection on a Linux machine says how to start sshd there.
+	if p := sshProblem(&Machine{ID: "gcp", Host: "gcp", Platform: "linux-amd64"}, "SSH 连接 gcp 失败：ssh: connect to host gcp port 22: Connection refused"); !strings.Contains(p.Next, "systemctl") || strings.Contains(p.Next, "macOS") {
+		t.Fatalf("linux refused: %q", p.Next)
 	}
 	// A failed local command is not an SSH problem.
 	p := sshProblem(&Machine{ID: "local", Name: "local (devbox)", IsLocal: true}, "本地探测命令执行失败：exit status 2")
@@ -262,6 +272,20 @@ func TestColdRowsSpeakPlainly(t *testing.T) {
 	}
 }
 
+// TestBackendWithoutRepository: a backend that answers but holds no repository says so.
+func TestBackendWithoutRepository(t *testing.T) {
+	no := false
+	st := &State{}
+	m := &Machine{ID: "gcp", Host: "gcp", Name: "gcp", Enabled: true, Reachable: true}
+	st.Machines = []*Machine{m}
+	cat := &ColdCatalog{MachineID: "gcp", State: ColdBackendDown, Backend: ColdBackend{ID: "nas", Type: "smb", Reachable: &no,
+		Error: "repo.json is not in the backend; if the repo folder is there and new, run disklessly init"}}
+	a := coldProblem(st, m, cat, ColdBackendDown)
+	if !strings.Contains(a.Reason, "还没有 Disklessly 仓库") || !strings.Contains(a.Command, "disklessly backend use") || !strings.Contains(a.Raw, "repo.json") || english.MatchString(a.text()) {
+		t.Fatalf("%+v", a)
+	}
+}
+
 // TestFleetTabSpeaksPlainly: the 多机总览 tab and the overview card word a failed probe the same way.
 func TestFleetTabSpeaksPlainly(t *testing.T) {
 	noSandbox(t)
@@ -353,6 +377,7 @@ case "$1" in
   list) exit ` + listRC + ` ;;
   --prefix) if [ -n "$2" ]; then echo "` + prefix + `/opt/${2##*/}"; else echo "` + prefix + `"; fi ;;
   install|upgrade)
+    if [ "` + mode + `" = same ]; then echo "Warning: nwverse/tap/disklessly-cli 0.3.0 already installed" >&2; exit 0; fi
     if [ "` + installRC + `" = 1 ]; then echo "Error: disklessly-cli: Failed to download resource" >&2; exit 1; fi
     cat > "` + filepath.Join(cli, "disklessly") + `" <<'EOF'
 ` + dkl + `EOF
@@ -386,7 +411,7 @@ func TestBrewScript(t *testing.T) {
 		t.Fatalf("install: %+v", o)
 	}
 	log, _ := os.ReadFile(filepath.Join(dir, "log"))
-	if !strings.Contains(string(log), "tap nwverse/tap") || !strings.Contains(string(log), "install nwverse/tap/disklessly-cli") || !strings.Contains(string(log), "cleanup -s nwverse/tap/disklessly-cli") {
+	if !strings.Contains(string(log), "tap nwverse/tap") || !strings.Contains(string(log), "install nwverse/tap/disklessly-cli") || !strings.Contains(string(log), "cleanup --prune=0 -s nwverse/tap/disklessly-cli") {
 		t.Fatalf("brew calls:\n%s", log)
 	}
 	// Already installed by Homebrew: upgrade.
@@ -401,6 +426,15 @@ func TestBrewScript(t *testing.T) {
 	o = runBrewScript(t, dir)
 	if o.ok || o.step != "install" || !strings.Contains(o.log, "Failed to download resource") {
 		t.Fatalf("failed install: %+v", o)
+	}
+	// Already the newest version: said so, and the formula's downloads are pruned.
+	dir = t.TempDir()
+	fakeBrew(t, dir, "0.3.0", true, "same")
+	if o := runBrewScript(t, dir); !o.ok || !o.same || o.op != "upgrade" {
+		t.Fatalf("up to date: %+v", o)
+	}
+	if log, _ := os.ReadFile(filepath.Join(dir, "log")); !strings.Contains(string(log), "cleanup --prune=0 -s nwverse/tap/disklessly-cli") {
+		t.Fatalf("no prune:\n%s", log)
 	}
 	// The keg works but Homebrew could not link it over another bin/disklessly: installed, with
 	// the link problem reported.
@@ -439,7 +473,8 @@ func TestBrewJob(t *testing.T) {
 	coldFleet(t, a)
 	var mu sync.Mutex
 	var calls []string
-	answer := "@@BREW_OP install\n@@BREW_OK disklessly 0.3.0\n"
+	answer := "@@BREW_OP install\n@@BREW_OK disklessly 0.3.0 (abc, built 2026-11-15) revision 2\n@@BREW_KEG /opt/homebrew/opt/disklessly-cli/bin/disklessly\n" +
+		"@@BREW_BIN /opt/homebrew/bin/disklessly\t/Applications/Disklessly.app/Contents/MacOS/disklessly\tdisklessly 0.2.3 (def) revision 2\n"
 	a.runner = func(ctx context.Context, m *Machine, s string, d time.Duration) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -456,7 +491,8 @@ func TestBrewJob(t *testing.T) {
 	}
 	a.waitJobs()
 	j := a.jobSnapshot()["studio-mac"]
-	if j.Err != "" || !strings.Contains(j.Note, "已用 Homebrew 安装 disklessly 0.3.0") {
+	if j.Err != "" || !strings.Contains(j.Note, "已用 Homebrew 安装 disklessly 0.3.0（/opt/homebrew/opt/disklessly-cli/bin/disklessly）") ||
+		!strings.Contains(j.Note, "/opt/homebrew/bin/disklessly → /Applications/Disklessly.app/Contents/MacOS/disklessly（disklessly 0.2.3）") || strings.Contains(j.Note, "revision") {
 		t.Fatalf("job %+v", j)
 	}
 	if len(calls) < 2 || calls[0] != "studio-mac:brew" || calls[1] != "studio-mac:refresh" {

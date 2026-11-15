@@ -76,7 +76,7 @@ func sshTarget(m *Machine) string {
 		b.WriteString("-p " + strconv.Itoa(m.Port) + " ")
 	}
 	if m.IdentityFile != "" {
-		b.WriteString("-i " + shellQuote(m.IdentityFile) + " ")
+		b.WriteString("-i " + shellPath(m.IdentityFile) + " ")
 	}
 	host := cmp.Or(m.Host, m.ID)
 	if m.User != "" && !strings.Contains(host, "@") {
@@ -86,7 +86,19 @@ func sshTarget(m *Machine) string {
 	return b.String()
 }
 
+// shellPath quotes p for a shell command line, leaving a leading ~/ to expand.
+func shellPath(p string) string {
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		if rest == "" {
+			return "~/"
+		}
+		return "~/" + shellQuote(rest)
+	}
+	return shellQuote(p)
+}
+
 var (
+	connectRE   = regexp.MustCompile(`connect to host (\S+) port (\d+)`)
 	sshFailRE   = regexp.MustCompile(`SSH 连接 (\S+) 失败：`)
 	localFailRE = regexp.MustCompile(`本地探测命令执行失败：`)
 	sshConfigRE = regexp.MustCompile(`(?i)bad owner or permissions on (\S+)`)
@@ -139,9 +151,23 @@ func sshProblem(m *Machine, raw string) problem {
 		p.Command = "ssh " + sshTarget(m)
 	case causeRefused:
 		p.Title, p.Edit = "连接被拒绝", true
-		p.Reason = name + "拒绝了连接：它的 SSH 服务没有打开，或者端口不对。"
-		p.Next = "在这台电脑上打开 SSH（macOS：系统设置 › 通用 › 共享 › 远程登录），或在「编辑当前机器节点」里改端口，然后点「重试」。"
 		p.Command = test
+		if mm := connectRE.FindStringSubmatch(line); mm != nil && isLoopback(mm[1]) {
+			// The machine is reached through a port forward on the hub, and nothing listens there.
+			p.Title, p.Edit = "端口转发没有运行", false
+			p.Reason = name + "要经过 hub 本机的端口转发（" + mm[1] + ":" + mm[2] + "）才能连上，但这个端口现在没有程序在监听，转发（例如 ssh -L、autossh 或隧道服务）没有在运行。"
+			p.Next = "在 hub 上把到这台电脑的转发重新建起来，然后点「重试」；可以用下面的命令确认能不能连上。"
+			break
+		}
+		p.Reason = name + "拒绝了连接：它的 SSH 服务没有打开，或者端口不对。"
+		switch plat := m.Platform; {
+		case strings.HasPrefix(plat, "darwin"):
+			p.Next = "在这台 Mac 上打开 SSH（系统设置 › 通用 › 共享 › 远程登录），或在「编辑当前机器节点」里改端口，然后点「重试」。"
+		case strings.HasPrefix(plat, "linux"):
+			p.Next = "在这台电脑上启动 SSH 服务（sudo systemctl enable --now sshd，Debian / Ubuntu 上服务名是 ssh），或在「编辑当前机器节点」里改端口，然后点「重试」。"
+		default:
+			p.Next = "在这台电脑上打开 SSH（macOS：系统设置 › 通用 › 共享 › 远程登录；Linux：启动 sshd 服务），或在「编辑当前机器节点」里改端口，然后点「重试」。"
+		}
 	case causeDNS:
 		p.Title, p.Edit = "找不到主机名", true
 		p.Reason = "hub 找不到" + name + "的主机名 " + cmp.Or(m.Host, m.ID) + "。"
@@ -172,6 +198,12 @@ func sshProblem(m *Machine, raw string) problem {
 		p.Command = test
 	}
 	return p
+}
+
+// isLoopback reports this computer's own address.
+func isLoopback(host string) bool {
+	h := strings.Trim(host, "[]")
+	return h == "localhost" || h == "::1" || strings.HasPrefix(h, "127.")
 }
 
 // humanize rewrites the SSH or local-command failure inside an error text (it may be wrapped,
@@ -293,13 +325,16 @@ V=$("$P" version 2>/dev/null | head -n 1)
 if [ -z "$V" ]; then fail verify "装好的 disklessly 在这台电脑上运行不了"; fi
 S=$("$P" --json sessions status 2>/dev/null | tr '\n' ' ')
 case "$S" in *EX_USAGE*|*"unknown sessions command"*) fail verify "装好的 disklessly 不支持 sessions status" ;; esac
-"$BREW" cleanup -s ` + brewFQ + ` >/dev/null 2>&1 || true
+if grep -q -i 'already installed' "$LOG" 2>/dev/null; then echo "@@BREW_SAME"; fi
+"$BREW" cleanup --prune=0 -s ` + brewFQ + ` >/dev/null 2>&1 || true
 rm -f "$LOG"
 echo "@@BREW_OK $V"
 echo "@@BREW_KEG $P"
 HB="$(dirname "$(dirname "$BREW")")/bin/disklessly"
-if [ -L "$HB" ]; then echo "@@BREW_BIN $HB -> $(readlink "$HB") $("$HB" version 2>/dev/null | head -n 1)"
-elif [ -x "$HB" ]; then echo "@@BREW_BIN $HB $("$HB" version 2>/dev/null | head -n 1)"; fi
+if [ -L "$HB" ] || [ -x "$HB" ]; then
+  T=""; if [ -L "$HB" ]; then T=$(readlink "$HB"); fi
+  printf '@@BREW_BIN %s\t%s\t%s\n' "$HB" "$T" "$("$HB" version 2>/dev/null | head -n 1)"
+fi
 ` + resolveCLIScript + `
 AV=""
 if [ -n "$DKL" ]; then AV=$("$DKL" version 2>/dev/null | head -n 1); fi
@@ -316,7 +351,10 @@ type brewOutcome struct {
 	op      string // install or upgrade
 	version string
 	keg     string // the installed CLI
-	bin     string // Homebrew's bin/disklessly and what it is
+	same    bool   // Homebrew had it at the newest version already
+	bin     string // Homebrew's bin/disklessly
+	binTo   string // what that link points to
+	binVer  string // what it answers to version
 	link    string // why Homebrew could not link it
 	shadow  string
 	step    string
@@ -341,8 +379,14 @@ func parseBrew(out string) brewOutcome {
 			log = append(log, strings.TrimPrefix(line, "@@BREW_LOG "))
 		case strings.HasPrefix(line, "@@BREW_KEG "):
 			o.keg = strings.TrimSpace(strings.TrimPrefix(line, "@@BREW_KEG "))
+		case line == "@@BREW_SAME":
+			o.same = true
 		case strings.HasPrefix(line, "@@BREW_BIN "):
-			o.bin = strings.TrimSpace(strings.TrimPrefix(line, "@@BREW_BIN "))
+			f := strings.SplitN(strings.TrimPrefix(line, "@@BREW_BIN "), "\t", 3)
+			for len(f) < 3 {
+				f = append(f, "")
+			}
+			o.bin, o.binTo, o.binVer = strings.TrimSpace(f[0]), strings.TrimSpace(f[1]), strings.TrimSpace(f[2])
 		case strings.HasPrefix(line, "@@BREW_LINK "):
 			o.link = strings.TrimSpace(strings.TrimPrefix(line, "@@BREW_LINK "))
 		case strings.HasPrefix(line, "@@BREW_SHADOW "):
