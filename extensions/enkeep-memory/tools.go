@@ -1,6 +1,6 @@
 package main
 
-// The tools the assistant and Agents may call (connector "enkeepmemory", capability tools): queue days to be digested
+// The tools the assistant and Agents may call (connector "enkeep", capability tools): queue days to be digested
 // again with the current daily prompt, and see how far the reruns got. A rerun is a one-off operation, not a setting:
 // it reads the user's own sources again inside the extension, sends nothing anywhere and deletes nothing; what it finds
 // goes through the same thresholds and review as any day's, and each day runs once per prompt, so asking twice does
@@ -18,8 +18,9 @@ import (
 	"github.com/nwverse/persona/sdk/go/ext"
 )
 
-// connectorID is the manifest's connector id.
-const connectorID = "enkeepmemory"
+// connectorID is the manifest's connector id. The hub keeps only the tools whose names start with it and "_"
+// (connector.owned), so the tools are enkeep_*.
+const connectorID = "enkeep"
 
 type tool struct {
 	Name        string         `json:"name"`

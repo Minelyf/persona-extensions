@@ -106,7 +106,19 @@ func (a *app) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]
 	if !a.member {
 		go a.schedule(ctx)
 	}
-	return nil, nil
+	// The connector the manifest declares (the rerun tools, tools.go), said back to the hub as the program's own.
+	return map[string]any{"connectors": manifestConnectors()}, nil
+}
+
+// manifestConnectors is the manifest's contributes.connectors, as written there.
+func manifestConnectors() json.RawMessage {
+	var m struct {
+		Contributes struct {
+			Connectors json.RawMessage `json:"connectors"`
+		} `json:"contributes"`
+	}
+	_ = json.Unmarshal(manifest, &m)
+	return m.Contributes.Connectors
 }
 
 // schedule runs the daily pass at daily_at for the day before, and the weekly pass on Mondays at weekly_at for the
