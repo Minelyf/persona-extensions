@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/convsrc"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/kbsrc"
+	"github.com/nwverse/persona/sdk/go/wire"
 	"strings"
 	"testing"
 	"time"
@@ -94,5 +97,33 @@ func TestPauseBackoff(t *testing.T) {
 		if got := pauseBackoff(fails); got != want {
 			t.Errorf("pauseBackoff(%d) = %v, want %v", fails, got, want)
 		}
+	}
+}
+
+// awaySrc is the sample source whose day reads find the assistant's computer away.
+type awaySrc struct{ kbsrc.Source }
+
+func (a awaySrc) Recent(ctx context.Context, since, until time.Time) ([]wire.KBEntry, error) {
+	return nil, fmt.Errorf("kb.recent: %w: the assistant's computer is not connected", convsrc.ErrAway)
+}
+
+// The assistant's computer away: the day is not done either, the pause says what was away, and it is tried again
+// after the wait rather than only at the next start.
+func TestAssistantAwayKeepsTheDay(t *testing.T) {
+	c, _ := newCurator(t, &stub.Model{}, "shadow")
+	c.Src = awaySrc{c.Src}
+	_, err := c.RunDaily(context.Background(), "2026-11-03", false)
+	if !errors.Is(err, ErrModelDown) {
+		t.Fatalf("err %v, want ErrModelDown", err)
+	}
+	if got := strings.Join(dailyRuns(c.St.S), ","); got != "" {
+		t.Fatalf("a day not read counted as run: %s", got)
+	}
+	p := c.St.S.ModelPause
+	if p == nil || p.What != "assistant" || p.Day != "2026-11-03" || !strings.Contains(p.Reason, "not connected") {
+		t.Fatalf("pause: %+v", p)
+	}
+	if _, wait := c.ModelWait(c.now()); !wait {
+		t.Fatal("no wait before the next try")
 	}
 }

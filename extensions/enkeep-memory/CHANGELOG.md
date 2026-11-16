@@ -1,5 +1,13 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.26 (pre-release)
+
+- **A day the assistant's computer is away for is tried again after a wait.** When the assistant's conversations
+  cannot be read because its computer is not connected, the day's pass ends unfinished and waits like when the model
+  is unavailable (`model_pause`, now with `what: assistant`), then tries the same day again; before, the day was only
+  tried again at the plugin's next start, so a rerun range could pass over it. The page says the assistant's computer
+  is not connected, not that the model is unavailable.
+
 ## 0.2.0-beta.25 (pre-release)
 
 - **A unit an upstream turns down is split, not lost.** An OpenAI-style upstream answers some requests with HTTP 400

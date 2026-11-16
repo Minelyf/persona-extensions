@@ -8,7 +8,8 @@ import (
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 )
 
-// ErrModelDown: a day's pass found the model unavailable before it had read every admitted unit. The day is not
+// ErrModelDown: a day's pass found the model unavailable before it had read every admitted unit, or could not read
+// the day at all because the assistant's computer was away (its conversations are one of the day's sources). The day is not
 // counted as done: the first-run replay stays on it, a rerun is not marked, and the passes wait (State.ModelPause)
 // until the next try. What was read before the model went away is kept (the state is saved after every unit).
 var ErrModelDown = errors.New("model unavailable: the day is kept to run again")
@@ -29,6 +30,11 @@ func pauseBackoff(fails int) time.Duration {
 // notePause records a pass that found the model unavailable (the caller holds the lock) and returns the error the
 // pass ends with.
 func (c *Curator) notePause(day string, cause error) error {
+	return c.notePauseOf(day, cause, "")
+}
+
+// notePauseOf is notePause for what was away ("" the model, "assistant" the assistant's computer).
+func (c *Curator) notePauseOf(day string, cause error, what string) error {
 	now := c.now().UTC()
 	p := c.St.S.ModelPause
 	if p == nil {
@@ -36,7 +42,7 @@ func (c *Curator) notePause(day string, cause error) error {
 		c.St.S.ModelPause = p
 	}
 	p.Fails++
-	p.Day, p.Reason = day, modelReason(cause)
+	p.Day, p.Reason, p.What = day, modelReason(cause), what
 	p.NextTry = now.Add(pauseBackoff(p.Fails)).Format(time.RFC3339)
 	return fmt.Errorf("%w: %s (%s)", ErrModelDown, day, p.Reason)
 }
