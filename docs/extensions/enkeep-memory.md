@@ -62,6 +62,13 @@ attribution checks), three skippable first-run questions, the facets and the peo
 category, per fork type and per source where they apply), a check page, and whether each exit reached the assistant
 (the hub's read-back). A weekly report goes to your devices when something changed.
 
+## Reading days again
+
+After the model was down, or when the extraction prompt changed, past days can be read again with the current
+prompt. Ask the assistant (or an Agent) to call `enkeep_rerun` with the first and last day; `enkeep_rerun_status` shows
+progress. The days run one at a time in the background, each at most once per prompt version, at most 31 days per
+call. The `rerun_range` setting does the same and still works.
+
 ## Development
 
 See the extension's [README](../../extensions/enkeep-memory/README.md) for the offline replay and acceptance tools.

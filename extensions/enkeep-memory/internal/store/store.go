@@ -345,11 +345,14 @@ type State struct {
 	NextTrait   int                   `json:"next_trait,omitempty"`
 	// LegacyMemory is the memory layer of a state written before v4, kept as it was (the layer is gone): the one-off
 	// clean reads it, curate.Migrate moves its entries into Entries, forgetting a source scrubs it.
-	LegacyMemory json.RawMessage     `json:"memory,omitempty"`
-	NextProp     int                 `json:"next_proposal"`
-	NextApplied  int                 `json:"next_applied"`
-	Reruns       []string            `json:"reruns,omitempty"`   // "<day>@<daily prompt>": days a daily run finished with that prompt (rerun_range)
-	Admitted     map[string][]string `json:"admitted,omitempty"` // day → units a daily run (not dry) admitted: what coverage may expect a digest for
+	LegacyMemory json.RawMessage `json:"memory,omitempty"`
+	NextProp     int             `json:"next_proposal"`
+	NextApplied  int             `json:"next_applied"`
+	Reruns       []string        `json:"reruns,omitempty"` // "<day>@<daily prompt>": days a daily run finished with that prompt (rerun_range)
+	// RerunQueue: days the assistant or an Agent asked to digest again with the current daily prompt (the
+	// enkeep_rerun tool), besides rerun_range; each runs once per prompt, as rerun_range's days do.
+	RerunQueue []string            `json:"rerun_queue,omitempty"`
+	Admitted   map[string][]string `json:"admitted,omitempty"` // day → units a daily run (not dry) admitted: what coverage may expect a digest for
 
 	// v4: every facet's entries in one structure (internal/entry), and what feeds and uses them. The event log is
 	// not here: it is append-only in events.jsonl (AppendEvents).
