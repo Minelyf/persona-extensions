@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/convsrc"
 	"slices"
 	"sort"
 	"strings"
@@ -44,6 +45,18 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 		c.collectBegin(day)
 	}
 	units, err := c.units(ctx, day)
+	if errors.Is(err, convsrc.ErrAway) {
+		// The assistant's computer is not connected: the day cannot be read whole now. Not done; tried again after
+		// the same wait as when the model is unavailable, instead of only at the next start.
+		perr := c.notePauseOf(day, err, "assistant")
+		if !dry {
+			if serr := c.St.Save(); serr != nil {
+				return nil, serr
+			}
+			c.Publish()
+		}
+		return nil, perr
+	}
 	if err != nil {
 		return nil, err
 	}

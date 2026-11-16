@@ -382,6 +382,8 @@ type ModelPause struct {
 	Day     string `json:"day"`      // the day whose pass could not run
 	Fails   int    `json:"fails"`    // passes in a row that found the model unavailable
 	NextTry string `json:"next_try"` // RFC 3339: no pass needing the model starts before it
+	// What was away: "" the model, "assistant" the assistant's computer (its conversations could not be read).
+	What string `json:"what,omitempty"`
 }
 
 // Backfill is the first-run replay of the user's history (4.1): the same daily and weekly passes over past days,

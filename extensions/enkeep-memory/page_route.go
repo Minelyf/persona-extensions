@@ -123,6 +123,12 @@ func (a *app) pauseLine(t tr, st *store.State, now time.Time) (string, string) {
 	if why == "" {
 		why = t.s("hub 没有给出原因", "the hub gave no reason")
 	}
+	if cp.What == "assistant" {
+		// The assistant's computer was away: its conversations, one of the day's sources, could not be read.
+		return fmt.Sprintf(t.s("助手的电脑没连上（%s），%s 这一天先不算读完，%s 再试。",
+			"The assistant's computer is not connected (%s); %s is not counted as read and will be tried again at %s."),
+			why, cp.Day, clock(cp.NextTry)), wire.ToneCaution
+	}
 	if cp.Fails < curate.PausedAfter {
 		return fmt.Sprintf(t.s("模型暂时不可用（%s），%s 再试 %s 这一天。", "The model is briefly unavailable (%s); %s will be tried again at %s."),
 			why, cp.Day, clock(cp.NextTry)), wire.ToneCaution
