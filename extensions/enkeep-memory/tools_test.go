@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/nwverse/persona/sdk/go/ext"
+	"github.com/nwverse/persona/sdk/go/exttest"
 	"slices"
 	"strings"
 	"testing"
@@ -113,4 +116,29 @@ func TestRerunToolDaysRun(t *testing.T) {
 	if !strings.Contains(status, "2 day(s) done, 0 waiting") {
 		t.Errorf("status: %q", status)
 	}
+}
+
+// The program says it has the manifest's connector, so the hub does not fall back to the manifest with a warning.
+func TestInitDeclaresTheConnector(t *testing.T) {
+	var got []map[string]any
+	if err := json.Unmarshal(manifestConnectors(), &got); err != nil || len(got) != 1 || got[0]["id"] != connectorID {
+		t.Fatalf("connectors: %s %v", manifestConnectors(), err)
+	}
+	caps, _ := got[0]["capabilities"].([]any)
+	if !slices.Contains(caps, any("tools")) {
+		t.Fatalf("capabilities: %v", caps)
+	}
+}
+
+// The hub's own connector checks (tool names start with the connector's id and "_", each has a description and an
+// object schema, status answers): what keeps the tools on the assistant's list.
+func TestConnectorConformance(t *testing.T) {
+	a, _ := toolApp(t)
+	// The connector side only: the full program's Init starts the passes, which would still write to the test's
+	// directories when it is cleaned up.
+	p := program(a)
+	p.Init = func(context.Context, *ext.Init, *ext.Hub) (map[string]any, error) {
+		return map[string]any{"connectors": manifestConnectors()}, nil
+	}
+	exttest.CheckConnectors(t, manifest, exttest.Serve(t, p))
 }

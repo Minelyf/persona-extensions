@@ -1,5 +1,14 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.28 (pre-release)
+
+- **The rerun tools reach the assistant and Agents.** In 0.2.0-beta.27 the connector was `enkeepmemory` and its tools
+  `enkeep_rerun` / `enkeep_rerun_status`; the hub keeps only a connector's tools whose names start with its id and
+  "_", so it dropped both and no conversation saw them. The connector is now `enkeep`. A test runs the hub's own
+  connector checks (`exttest.CheckConnectors`), which fail on such a name.
+- The program declares its connector when it starts, as the manifest does; the hub no longer logs that it fell back
+  to the manifest's.
+
 ## 0.2.0-beta.27 (pre-release)
 
 - **Reruns are a tool, not only a setting.** The assistant and coding Agents can call `enkeep_rerun` (`from`, `to`:
