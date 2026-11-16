@@ -158,7 +158,10 @@ func (a *app) tick(ctx context.Context) {
 	}
 	// rerun_range: only completed local days are rerun, one at a time with the current daily prompt. An early daily
 	// must not suppress the formal pass after the day ends. Each day runs only once per prompt.
-	days := c.Cfg.RerunDays()
+	// The days asked for by the enkeep_rerun tool (State.RerunQueue) run the same way.
+	c.St.Lock()
+	days := c.RerunPlan()
+	c.St.Unlock()
 	today := now.Format("2006-01-02")
 	for i, day := range days {
 		if day >= today {

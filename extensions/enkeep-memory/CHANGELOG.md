@@ -1,5 +1,17 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.27 (pre-release)
+
+- **Reruns are a tool, not only a setting.** The assistant and coding Agents can call `enkeep_rerun` (`from`, `to`:
+  days to read again with the current daily prompt) and `enkeep_rerun_status` (what is done, what waits, what runs
+  now, whether the passes wait for the model or the assistant's computer), through the extension's connector
+  `enkeepmemory` (capability `tools`; `agent_tools: enkeep_*`). A call queues the days in the state and returns at
+  once; they run as `rerun_range`'s do: one at a time in the background, completed days only, each at most once per
+  prompt version, waiting while the model or the assistant's computer is away. At most 31 days per call. A rerun
+  reads the user's own sources again inside the extension, sends nothing and deletes nothing, and what it finds goes
+  through the same thresholds and review as any day's, so it is a tool rather than a gated write. `rerun_range` (the
+  setting) works as before.
+
 ## 0.2.0-beta.26 (pre-release)
 
 - **A day the assistant's computer is away for is tried again after a wait.** When the assistant's conversations
