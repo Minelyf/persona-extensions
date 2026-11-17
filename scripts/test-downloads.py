@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Exact public download counters, signed ranking, and immutable icon projections."""
 import copy
+import datetime
 import pathlib
+import re
 import sys
 import unittest
 from unittest import mock
@@ -67,11 +69,50 @@ class DownloadTests(unittest.TestCase):
             catalog.icon_url("demo", "assets/icon.png", "main")
 
     def test_rfc3339_rejects_invalid_and_naive_timestamps(self):
-        for timestamp in ("2026-01-02T03:04:05Z", "2026-01-02T03:04:05.1+08:00"):
-            catalog.validate_downloads_timestamp(timestamp)
-        for timestamp in (None, "2026-01-02", "2026-01-02T03:04:05", "2026-13-01T00:00:00Z"):
-            with self.assertRaises(ValueError):
+        for timestamp in VALID_TIMESTAMPS:
+            with self.subTest(timestamp=timestamp):
                 catalog.validate_downloads_timestamp(timestamp)
+        for timestamp in INVALID_TIMESTAMPS:
+            with self.subTest(timestamp=timestamp), self.assertRaises(ValueError):
+                catalog.validate_downloads_timestamp(timestamp)
+
+    def test_rfc3339_result_does_not_depend_on_fromisoformat(self):
+        # Simulates the documented Python 3.9/3.10 fromisoformat contract (only isoformat() output, so a
+        # fraction has exactly 3 or 6 digits); this does not run those interpreters.
+        class LegacyDatetime(datetime.datetime):
+            @classmethod
+            def fromisoformat(cls, value):
+                fraction = re.search(r"\.([0-9]*)", value)
+                if fraction and len(fraction.group(1)) not in (3, 6):
+                    raise ValueError(f"Invalid isoformat string: {value!r}")
+                return super().fromisoformat(value)
+
+        with mock.patch.object(catalog.datetime, "datetime", LegacyDatetime):
+            for timestamp in VALID_TIMESTAMPS:
+                with self.subTest(timestamp=timestamp):
+                    catalog.validate_downloads_timestamp(timestamp)
+            for timestamp in INVALID_TIMESTAMPS:
+                with self.subTest(timestamp=timestamp), self.assertRaises(ValueError):
+                    catalog.validate_downloads_timestamp(timestamp)
+
+
+VALID_TIMESTAMPS = (
+    "2026-01-02T03:04:05Z", "2026-01-02T03:04:05.1+08:00", "2026-01-02T03:04:05.12Z", "2026-01-02T03:04:05.123Z",
+    "2026-01-02T03:04:05.1234-05:30", "2026-01-02T03:04:05.12345Z", "2026-01-02T03:04:05.123456Z",
+    "2026-01-02T03:04:05.1234567Z", "2026-01-02T23:59:59.999999999999+00:00", "2026-01-02T03:04:05-00:00",
+    "2026-01-02T03:04:05+23:59", "2026-01-02T03:04:05-23:59", "2024-02-29T00:00:00Z", "0001-01-01T00:00:00+01:00",
+    "9999-12-31T23:59:59-01:00",
+)
+INVALID_TIMESTAMPS = (
+    None, 1, "2026-01-02", "2026-01-02T03:04:05", "2026-01-02T03:04:05.123456",
+    "2026-13-01T00:00:00Z", "2026-00-10T00:00:00Z", "2026-01-00T00:00:00Z", "2026-02-29T00:00:00Z",
+    "2026-04-31T00:00:00Z", "0000-01-01T00:00:00Z", "2026-01-02T24:00:00Z", "2026-01-02T23:60:00Z",
+    "2026-01-02T23:59:60Z", "2026-01-02T03:04:05+24:00", "2026-01-02T03:04:05-24:00", "2026-01-02T03:04:05+23:60",
+    "2026-01-02T03:04:05+00:60", "2026-01-02T03:04:05-00:99", "2026-01-02T03:04:05+99:99",
+    "2026-01-02T03:04:05.Z", "2026-01-02t03:04:05Z", "2026-01-02T03:04:05z", "2026-01-02 03:04:05Z",
+    "2026-01-02T03:04:05+0800", "2026-01-02T03:04:05+08", "2026-01-02T03:04:05+08:00:00", "2026-01-02T03:04:05Z\n",
+    "2026-01-02T03:04:0５Z", "+2026-01-02T03:04:05Z", "2026-1-02T03:04:05Z",
+)
 
 
 from test_support import CatalogFixture
