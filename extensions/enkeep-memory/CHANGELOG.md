@@ -1,5 +1,18 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.31 (pre-release)
+
+- **The hub runs the chain.** A call hands its whole chain (`model_primary`, then `model_long` or `model_short` by
+  size) to model.complete's `models` (persona #10398), and the hub tries the candidates in order. Each candidate may
+  take `model_timeout` seconds (180; the schema's second try included), which replaces 0.2.0-beta.30's
+  `model_primary_timeout`. What is counted and logged is what the hub says: the candidate that answered, the model the
+  upstream named, and each failed candidate's code and reason from `attempts` / `model_candidates_failed`. When the
+  user switched the lists off or replaced them on the purpose, the call is noted "candidates off" or "the user's own
+  list". When no candidate matched the schema, the purpose's model is asked the old way and its reply goes to the
+  step's own checks, as before. A hub without `models` still gets the old call.
+- The SDK copy is synced from persona f7c715f076 (`ModelCompleteParams.Models`, `ModelAttempt`,
+  `ModelCandidatesFailed`, `ModelNotOffered`).
+
 ## 0.2.0-beta.30 (pre-release)
 
 - **Model routes: a primary model first, a fallback by length.** On a hub whose model.complete takes `models`, every
