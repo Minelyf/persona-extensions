@@ -32,6 +32,7 @@ type Request struct {
 	User      string          // the input, usually JSON
 	MaxTokens int             //
 	Schema    json.RawMessage // the JSON schema of the answer
+	Timeout   int             // seconds for the whole call; 0: by tier (callTimeout)
 }
 
 // Response is a call's answer and what it cost.
@@ -77,11 +78,24 @@ func refused(msg string) bool {
 
 // Hub calls model.complete on the hub (nwverse/persona#6102, permission "models"). The hub runs it on the
 // extension's own purpose extension.<id> in Settings › Model configuration, which follows the knowledge base's model
-// until the user picks another; the extension never holds a key and does not pick the connection. There is no
-// budget and no cap: each call's usage comes back and is recorded per day and step (Metered).
+// until the user picks another; the extension never holds a key. With a Route, each call names the model it wants
+// (model.complete's "models", on a hub that takes it) and falls back along the route; without one, or on a hub that
+// does not take "models", the call runs on the purpose's model. There is no budget and no cap: each call's usage
+// comes back and is recorded per day and step (Metered).
 type Hub struct {
 	H         *ext.Hub
 	Extension string
+	Route     *Route // nil, or without models: every call on the purpose's model, as before 0.2.0-beta.30
+	// call makes one model.complete (tests replace it); nil: H.Call.
+	call func(ctx context.Context, params any, out *wire.ModelCompleteResult) error
+}
+
+// routedParams is model.complete's params with the model a call names (docs/model-routes.md): a hub that takes
+// "models" tries them in order on the extension's connection. The route names one at a time, so that it judges
+// every failure itself and counts each model's attempt.
+type routedParams struct {
+	wire.ModelCompleteParams
+	Models []string `json:"models,omitempty"`
 }
 
 // callTimeout bounds one call, the hub's second try for a reply that does not match the schema included.
@@ -92,11 +106,40 @@ func callTimeout(t Tier) int {
 	return 300
 }
 
-func (h Hub) Complete(ctx context.Context, r Request) (Response, error) {
-	out, err := h.H.ModelComplete(ctx, wire.ModelCompleteParams{
+func (h Hub) params(r Request) wire.ModelCompleteParams {
+	return wire.ModelCompleteParams{
 		System: r.System, Messages: []wire.ModelMessage{{Role: wire.ModelRoleUser, Content: r.User}},
-		MaxTokens: r.MaxTokens, JSONSchema: r.Schema, TimeoutSeconds: callTimeout(r.Tier), Label: r.Step,
-	})
+		MaxTokens: r.MaxTokens, JSONSchema: r.Schema, TimeoutSeconds: timeout(r), Label: r.Step,
+	}
+}
+
+func timeout(r Request) int {
+	if r.Timeout > 0 {
+		return r.Timeout
+	}
+	return callTimeout(r.Tier)
+}
+
+func (h Hub) do(ctx context.Context, params any) (wire.ModelCompleteResult, error) {
+	var out wire.ModelCompleteResult
+	if h.call != nil {
+		err := h.call(ctx, params, &out)
+		return out, err
+	}
+	err := h.H.Call(ctx, "model.complete", params, &out)
+	return out, err
+}
+
+func (h Hub) Complete(ctx context.Context, r Request) (Response, error) {
+	if h.Route.Enabled() {
+		return h.Route.complete(ctx, r, h.try, h.legacy)
+	}
+	return h.legacy(ctx, r)
+}
+
+// legacy is the call on the purpose's model, as before routes.
+func (h Hub) legacy(ctx context.Context, r Request) (Response, error) {
+	out, err := h.do(ctx, h.params(r))
 	var e *ext.Error
 	if errors.As(err, &e) {
 		switch e.Code {
@@ -124,13 +167,79 @@ func (h Hub) Complete(ctx context.Context, r Request) (Response, error) {
 	if out.StopReason == "refusal" { // a hub that passes the upstream's stop reason through
 		return Response{}, fmt.Errorf("%w: stop_reason refusal", ErrRefused)
 	}
+	return response(r, out), nil
+}
+
+func response(r Request, out wire.ModelCompleteResult) Response {
 	text := out.Text
 	if len(r.Schema) > 0 && len(out.JSON) > 0 { // the hub checked it against the schema: take the decoded value
 		text = string(out.JSON)
 	}
 	u := out.Usage
 	return Response{Text: text, Model: out.Model, InTokens: u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens,
-		OutTokens: u.OutputTokens}, nil
+		OutTokens: u.OutputTokens}
+}
+
+// try is one attempt on model m: an answer, errNoModels from a hub that does not take "models", or an *attemptError
+// that says why m did not answer.
+func (h Hub) try(ctx context.Context, r Request, m string) (Response, error) {
+	out, err := h.do(ctx, routedParams{ModelCompleteParams: h.params(r), Models: []string{m}})
+	fail := func(reason string, err error) (Response, error) {
+		return Response{}, &attemptError{reason: reason, err: err}
+	}
+	var e *ext.Error
+	if errors.As(err, &e) {
+		switch e.Code {
+		case wire.ModelErrorCodeInvalidParams:
+			if strings.Contains(e.Message, `"models"`) { // json: unknown field "models"
+				return Response{}, errNoModels
+			}
+			return fail(ReasonError, err)
+		case wire.ErrorCodeUnknownMethod, wire.ErrorCodeUnsupported, wire.ErrorCodePermissionDenied,
+			wire.ModelErrorCodeAssistantOffline:
+			// The hub cannot run any model for the extension: no other model would do better.
+			return Response{}, &attemptError{reason: ReasonUnavailable, err: fmt.Errorf("%w: %s", ErrUnavailable, e.Message), fatal: true}
+		case wire.ModelErrorCodeModelUnavailable:
+			return fail(ReasonNotOffered, fmt.Errorf("%w: %s", ErrUnavailable, e.Message))
+		case wire.ModelErrorCodeModelPaused:
+			return fail(ReasonUnavailable, fmt.Errorf("%w: %s", ErrUnavailable, e.Message))
+		case wire.ModelErrorCodeModelRefused:
+			return fail(ReasonRefused, fmt.Errorf("%w: %s", ErrRefused, e.Message))
+		case wire.ModelErrorCodeTimeout:
+			return fail(ReasonTimeout, err)
+		case wire.ModelErrorCodeInvalidOutput:
+			ae := &attemptError{reason: ReasonFormat, err: err}
+			if resp, ok := fromInvalidOutput(e.Data); ok {
+				if resp.Model == "" {
+					resp.Model = m
+				}
+				ae.reply = &resp
+			}
+			return Response{}, ae
+		case wire.ModelErrorCodeModelFailed:
+			if refused(e.Message) {
+				return fail(ReasonRefused, fmt.Errorf("%w: %s", ErrRefused, e.Message))
+			}
+			return fail(ReasonError, err)
+		}
+	}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return fail(ReasonTimeout, err)
+		}
+		return fail(ReasonError, err)
+	}
+	if out.StopReason == "refusal" {
+		return fail(ReasonRefused, fmt.Errorf("%w: stop_reason refusal", ErrRefused))
+	}
+	resp := response(r, out)
+	if strings.TrimSpace(resp.Text) == "" {
+		return fail(ReasonEmpty, fmt.Errorf("model.complete (%s) on %s: empty answer", r.Step, m))
+	}
+	if resp.Model == "" {
+		resp.Model = m
+	}
+	return resp, nil
 }
 
 // Usage is what the calls cost in tokens, recorded per day and step for the report (there is no cap: the user

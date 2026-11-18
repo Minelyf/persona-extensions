@@ -13,6 +13,7 @@ import (
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/curate"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/entry"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/kbsrc"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/model"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/schema"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/stub"
@@ -79,6 +80,18 @@ func TestRerunTool(t *testing.T) {
 	status, err := call(t, a, "enkeep_rerun_status", map[string]any{})
 	if err != nil || !strings.Contains(status, "0 day(s) done, 2 waiting") || !strings.Contains(status, "2026-11-02, 2026-11-04") {
 		t.Fatalf("status: %q %v", status, err)
+	}
+	if !strings.Contains(status, "Model route: off") {
+		t.Fatalf("status without a route: %q", status)
+	}
+	a.route = curate.Defaults().Route()
+	a.route.Stats = model.OpenStats(t.TempDir(), time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
+	status, _ = call(t, a, "enkeep_rerun_status", map[string]any{})
+	for _, w := range []string{"Model route: no primary model; fallback above 16000 estimated tokens claude-sonnet-5-5, else claude-haiku-5-5.",
+		"Model calls since 2026-11-18T00:00:00Z: 0, answered by a fallback 0 (0.0%)"} {
+		if !strings.Contains(status, w) {
+			t.Fatalf("status lacks %q: %q", w, status)
+		}
 	}
 }
 

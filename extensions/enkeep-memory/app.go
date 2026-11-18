@@ -41,7 +41,8 @@ type app struct {
 	hubLoc    *time.Location
 	rt        string // the assistant's runtime, cached (page_v4.go)
 	rtAt      time.Time
-	exitDir   string // where the exit files are when not in the store's directory (the page subcommand)
+	exitDir   string       // where the exit files are when not in the store's directory (the page subcommand)
+	route     *model.Route // the model route; nil: every call on the purpose's model (model_route "purpose")
 }
 
 func newApp() *app { return &app{} }
@@ -95,7 +96,15 @@ func (a *app) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]
 		more.Logf = withConversations.Logf
 		src, collect = more, more
 	}
-	a.c = &curate.Curator{Src: src, Model: model.Hub{H: hub, Extension: info.ID}, St: st, Cfg: cfg, Loc: loc,
+	// The model route (docs/model-routes.md): each call names its model and falls back by length; its counts are kept
+	// in model-routes.json beside the state and shown by enkeep_rerun_status.
+	route := cfg.Route()
+	if route != nil {
+		route.Stats = model.OpenStats(dir, time.Now())
+		route.Logf = func(f string, args ...any) { log.Printf(f, args...) }
+		a.route = route
+	}
+	a.c = &curate.Curator{Src: src, Model: model.Hub{H: hub, Extension: info.ID, Route: route}, St: st, Cfg: cfg, Loc: loc,
 		Lang: in.Hub.Locale, Extension: info.ID, Logf: func(f string, args ...any) { log.Printf(f, args...) }, Live: &curate.Live{},
 		Collect: collect, Hub: a.hubAPI, Cards: curate.PeopleCards{}}
 	st.Lock() // nothing runs yet: the health page's first snapshot

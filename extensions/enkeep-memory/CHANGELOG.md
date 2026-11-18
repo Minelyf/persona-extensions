@@ -1,5 +1,22 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.30 (pre-release)
+
+- **Model routes: a primary model first, a fallback by length.** On a hub whose model.complete takes `models`, every
+  text step (daily extraction and triage, weekly consolidation and synthesis, people cards, signals, exit rewriting)
+  asks `model_primary` first (none by default: set it to the connection's fast model, a Flash-class one, say). When it fails (an error, a timeout after
+  `model_primary_timeout`, 120 s; an empty answer; an answer that does not match the schema; a refusal; the model
+  paused), the call goes to `model_long` (default `claude-sonnet-5-5`) if its estimated size is above
+  `model_long_above` (16000 tokens), else to `model_short` (default `claude-haiku-5-5`). The estimate is the input
+  (system prompt, user turn and schema: a quarter token per ASCII byte, one per other character) plus the room the
+  step asks for its answer (`max_tokens`). On a hub without `models`, or when none of the route's models is on the
+  connection, a call runs on the purpose's model as before; `model_route: purpose` turns the route off. The exits'
+  format does not change. See [docs/model-routes.md](docs/model-routes.md).
+- **Each call is counted and logged.** `enkeep_rerun_status` ends with the route and its counts: calls, fallback
+  rate, unanswered calls, calls sent the old way, and per model the attempts, answers, failures by reason and average
+  time. `model-routes.json` keeps the counts and the last 50 calls, `model-calls.jsonl` a line per call (models tried,
+  why each failed, which answered; never what was sent or answered).
+
 ## 0.2.0-beta.29 (pre-release)
 
 - **`enkeep_resettle`: settle every entry's status again, as a tool.** The assistant and Agents can call it on the
