@@ -351,8 +351,11 @@ type State struct {
 	Reruns       []string        `json:"reruns,omitempty"` // "<day>@<daily prompt>": days a daily run finished with that prompt (rerun_range)
 	// RerunQueue: days the assistant or an Agent asked to digest again with the current daily prompt (the
 	// enkeep_rerun tool), besides rerun_range; each runs once per prompt, as rerun_range's days do.
-	RerunQueue []string            `json:"rerun_queue,omitempty"`
-	Admitted   map[string][]string `json:"admitted,omitempty"` // day → units a daily run (not dry) admitted: what coverage may expect a digest for
+	RerunQueue []string `json:"rerun_queue,omitempty"`
+	// ForceReruns: days enkeep_rerun queued with force (0.2.0-beta.33): read again although they already carry the
+	// current prompt's marker (a unit lost to a model error, say). A day leaves the list once its daily run completes.
+	ForceReruns []string            `json:"force_reruns,omitempty"`
+	Admitted    map[string][]string `json:"admitted,omitempty"` // day → units a daily run (not dry) admitted: what coverage may expect a digest for
 
 	// v4: every facet's entries in one structure (internal/entry), and what feeds and uses them. The event log is
 	// not here: it is append-only in events.jsonl (AppendEvents).

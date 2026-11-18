@@ -1,5 +1,23 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.33 (pre-release)
+
+- **A unit the model could not read keeps its day open.** Before, a unit whose call failed with an error other than
+  the model being unavailable was counted in `digest_errors` and passed over, and the day was finished and marked read
+  with the current prompt, so a rerun skipped the unit for good. Now the day is not done, as when the model is away:
+  what was read is kept, the pass waits with the same backoff, and the day runs again from where it stopped.
+- **A chain with a candidate not offered and one not matching the schema** (`model_candidates_failed` with only
+  `model_unavailable` and `invalid_output`) asks the purpose's model the old way, whose reply comes back even when it
+  does not match, for the step's own checks of each item, as when every candidate did not match. Before, the call
+  failed and the unit went unread. Seen live: Gemini not offered, Haiku adding a `summary_placeholder` key to a
+  summary point. That key is the model's, not the schema's (every summary point is `{text, evidence}` with
+  `additionalProperties: false`); the daily prompt will say so with its next version, and the item checks already
+  keep a point's text and evidence and drop the rest.
+- **`enkeep_rerun` takes `force: true`**: the days are read again even if they already carry the current prompt's
+  marker (still past days only, at most 31 per call). Units read before come from the ledger, so only what was not
+  read calls the model. `enkeep_rerun_status` lists the days waiting with force; a day leaves the list once its daily
+  run completes.
+
 ## 0.2.0-beta.32 (pre-release)
 
 - **Builds on an SDK copy from before candidate models.** The candidate parts of model.complete (`models`, `candidate`,

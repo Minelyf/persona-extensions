@@ -294,9 +294,11 @@ func (rt *Route) complete(ctx context.Context, r Request, call func(context.Cont
 	case every(attempts, ReasonNotOffered):
 		// None of the route's models is offered (another user's providers, say): the purpose's own model is.
 		return rt.old(ctx, r, est, size, legacy, "no route model offered", attempts...)
-	case every(attempts, ReasonFormat):
-		// No candidate matched the schema: the old call returns the purpose model's reply anyway, for the step's own
-		// checks of each item, as before routes.
+	case onlyFormatOrNotOffered(attempts):
+		// No candidate matched the schema (the others were not offered): the reply the hub had is not in the data of
+		// model_candidates_failed, so the old call asks the purpose's model, whose reply comes back even when it does
+		// not match, for the step's own checks of each item, as before routes (0.2.0-beta.33; before, a chain with a
+		// candidate not offered and one not matching failed the call, and the unit went unread).
 		return rt.old(ctx, r, est, size, legacy, "no candidate matched the schema", attempts...)
 	}
 	rt.done(began, r, est, size, attempts, "", false, "")
@@ -326,6 +328,21 @@ func every(attempts []Attempt, reason string) bool {
 		}
 	}
 	return len(attempts) > 0
+}
+
+// onlyFormatOrNotOffered: every candidate either did not match the schema or was not offered, and one did not match.
+func onlyFormatOrNotOffered(attempts []Attempt) bool {
+	format := false
+	for _, a := range attempts {
+		switch a.Reason {
+		case ReasonFormat:
+			format = true
+		case ReasonNotOffered:
+		default:
+			return false
+		}
+	}
+	return format
 }
 
 func cmpOr(a, b string) string {

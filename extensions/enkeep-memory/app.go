@@ -190,6 +190,16 @@ func (a *app) tick(ctx context.Context) {
 			break
 		}
 	}
+	// Days queued with force (enkeep_rerun force) run first, although they carry the current prompt's marker.
+	c.St.Lock()
+	forced := slices.Clone(c.St.S.ForceReruns)
+	c.St.Unlock()
+	for _, day := range forced {
+		if day < today && !a.attempted(day) {
+			a.start(ctx, "daily", day)
+			return
+		}
+	}
 	for _, day := range days {
 		if !a.reran(day) && !a.attempted(day) {
 			a.start(ctx, "daily", day)
@@ -395,6 +405,8 @@ func (a *app) start(ctx context.Context, kind, period string) bool {
 				if key := period + "@" + schema.DailyPrompt; !slices.Contains(a.c.St.S.Reruns, key) {
 					a.c.St.S.Reruns = append(a.c.St.S.Reruns, key)
 				}
+				// A day queued with force is done once its daily run completes.
+				a.c.St.S.ForceReruns = slices.DeleteFunc(a.c.St.S.ForceReruns, func(d string) bool { return d == period })
 				err = a.c.St.Save()
 				a.c.St.Unlock()
 			}

@@ -345,3 +345,25 @@ func TestStatsPersist(t *testing.T) {
 		t.Fatalf("lines %d", n)
 	}
 }
+
+// A candidate not offered and one not matching the schema: the old call's reply goes to the step's own checks, as
+// when every candidate did not match (the unit is read, not lost).
+func TestRouteNotOfferedThenNonconforming(t *testing.T) {
+	data, _ := json.Marshal(wire.ModelInvalidOutput{Problem: "$.summary[1]: unexpected property", Text: `{"z":3}`})
+	rt, _ := testRoute(t)
+	f := &fakeHub{answers: answers{
+		"small": fails(wire.ModelErrorCodeInvalidOutput, "the reply does not match json_schema"),
+		"": func() (wire.ModelCompleteResult, error) {
+			return wire.ModelCompleteResult{}, &ext.Error{Code: wire.ModelErrorCodeInvalidOutput, Message: "bad", Data: data}
+		},
+	}}
+	resp, err := Hub{Route: rt, call: f.call}.Complete(context.Background(), shortReq)
+	if err != nil || resp.Text != `{"z":3}` || resp.Nonconforming == "" || joined(f.calls) != "[flash small],[]" {
+		t.Fatalf("%+v %v %s", resp, err, joined(f.calls))
+	}
+	s := rt.Stats.Snapshot()
+	if s.Calls != 1 || s.Legacy != 1 || s.Failed != 0 || s.Recent[0].Legacy != "no candidate matched the schema" ||
+		s.Models["flash"].Failures[ReasonNotOffered] != 1 || s.Models["small"].Failures[ReasonFormat] != 1 {
+		t.Fatalf("stats %+v", s)
+	}
+}

@@ -71,7 +71,10 @@ category, per fork type and per source where they apply), a check page, and whet
 After the model was down, or when the extraction prompt changed, past days can be read again with the current
 prompt. Ask the assistant (or an Agent) to call `enkeep_rerun` with the first and last day; `enkeep_rerun_status` shows
 progress. The days run one at a time in the background, each at most once per prompt version, at most 31 days per
-call. The `rerun_range` setting does the same and still works.
+call. The `rerun_range` setting does the same and still works. With `force: true` the days are read again even if
+they were already read with the current prompt, for a day that lost a unit to a model error; what was read before is
+reused and only the rest calls the model. A unit the model cannot read keeps its day open: the day waits and runs again
+from where it stopped, as when the model is away.
 
 ## Development
 
