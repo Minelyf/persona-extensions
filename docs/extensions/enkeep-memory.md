@@ -27,7 +27,11 @@ out of everything the assistant reads at once.
   counts.
 - Scopes: `kb.read`, `kb.write`, `models`, `assistant.read`, `agents.read`, `todos.read`, `notify`, `assistant.ask`,
   `assistant.memory.read`. A scope you do not grant is a source the extension goes without; the sources card says so.
-- A model for it under Settings › Model configuration. The extension never sees the key.
+- A model for it under Settings › Model configuration. The extension never sees the key. On a hub whose
+  `model.complete` takes `models`, each call tries `model_primary` first and, when it fails, `model_long` or
+  `model_short` by the call's estimated size (`model_long_above`); `model_route: purpose` keeps every call on the
+  purpose's model. `enkeep_rerun_status` shows the calls per model and the fallback rate
+  ([model routes](../../extensions/enkeep-memory/docs/model-routes.md)).
 
 ## Sources
 

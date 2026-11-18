@@ -43,7 +43,8 @@ var rerunTools = []tool{
 		}}},
 	{Name: "enkeep_rerun_status", Description: "Show how far enkeep memory's reruns got: the days queued (by enkeep_rerun " +
 		"or the rerun_range setting), which are done with the current prompt, which are waiting, what is running now, " +
-		"and whether the passes wait for the model or the assistant's computer.",
+		"and whether the passes wait for the model or the assistant's computer; also the model route: calls per model, " +
+		"fallbacks and why.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
 	{Name: "enkeep_resettle", Description: "Settle every enkeep memory entry's status (candidate, stable, shifting, dormant, " +
 		"retired) again as of today, counting only the days the extraction really read with the model. Use it to check " +
@@ -137,6 +138,7 @@ func (a *app) callTool(name string, raw json.RawMessage) (string, error) {
 		if p.Paused != "" {
 			fmt.Fprintf(&b, " Paused: %s.", p.Paused)
 		}
+		b.WriteString("\n" + a.modelText())
 		return b.String(), nil
 	case "enkeep_resettle":
 		in := struct {
@@ -153,6 +155,24 @@ func (a *app) callTool(name string, raw json.RawMessage) (string, error) {
 		return resettleText(r), nil
 	}
 	return "", errors.New("unknown tool " + name)
+}
+
+// modelText says the model route and what it counted (docs/model-routes.md).
+func (a *app) modelText() string {
+	rt := a.route
+	if rt == nil {
+		return "Model route: off (model_route purpose): every call on the model of the extension's purpose in the hub's model settings."
+	}
+	var b strings.Builder
+	primary := strings.Join(rt.Primary, " → ")
+	if primary == "" {
+		primary = "no primary model"
+	}
+	fmt.Fprintf(&b, "Model route: %s; fallback above %d estimated tokens %s, else %s.", primary, rt.LongAbove, rt.Long, rt.Short)
+	if rt.Stats != nil {
+		b.WriteString("\n" + rt.Stats.Snapshot().Summary())
+	}
+	return b.String()
 }
 
 // localDay is the local day in the curator's time zone.
