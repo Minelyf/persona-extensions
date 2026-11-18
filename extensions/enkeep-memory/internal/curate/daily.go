@@ -170,13 +170,17 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 			}
 		}
 		if err != nil {
+			// A unit the model could not read: unavailable, or an error that held after every fallback model. The day
+			// is not done either way (0.2.0-beta.33): what was read is kept, the rest waits and the day runs again from
+			// where it stopped, as when the model is away. Counting the unit as an error and finishing the day would
+			// mark the day read with the current prompt, and a rerun would then skip the unit for good.
+			modelDown, downErr = true, err
 			if errors.Is(err, model.ErrUnavailable) {
-				modelDown, downErr = true, err
 				run.Notes = append(run.Notes, "模型不可用（"+modelReason(err)+"）：只做了分拣和确定性检查")
-				continue
+			} else {
+				run.Notes = append(run.Notes, fmt.Sprintf("%s：%v（这一天稍后从这里接着读）", u.Meta.Name, err))
+				run.Counts["digest_errors"]++
 			}
-			run.Notes = append(run.Notes, fmt.Sprintf("%s：%v", u.Meta.Name, err))
-			run.Counts["digest_errors"]++
 			continue
 		}
 		live.progress(func(p *Progress) { p.Refused = len(run.Refusals) })

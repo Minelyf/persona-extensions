@@ -20,12 +20,15 @@ const RerunMostDays = 31
 type RerunRequest struct {
 	Queued  []string // days newly queued
 	Already []string // days already digested with the current prompt, or already queued
+	Force   bool     // queued with force: read again even if already digested with the current prompt
 }
 
 // QueueRerun queues the days from..to (YYYY-MM-DD, inclusive) to be digested again with the current daily prompt.
 // Only days before today; at most RerunMostDays; a day already digested with the current prompt or already queued is
-// not queued again. It takes the store's lock.
-func (c *Curator) QueueRerun(from, to, today string) (RerunRequest, error) {
+// not queued again. With force, a day is queued although it already carries the current prompt's marker (only a day
+// already force-queued is left out); its units digested before are taken from the ledger, so only what was not read
+// calls the model. It takes the store's lock.
+func (c *Curator) QueueRerun(from, to, today string, force bool) (RerunRequest, error) {
 	a, err1 := time.Parse("2006-01-02", from)
 	b, err2 := time.Parse("2006-01-02", to)
 	if err1 != nil || err2 != nil {
@@ -46,8 +49,17 @@ func (c *Curator) QueueRerun(from, to, today string) (RerunRequest, error) {
 	}
 	c.St.Lock()
 	defer c.St.Unlock()
-	var r RerunRequest
+	r := RerunRequest{Force: force}
 	for _, d := range days {
+		if force {
+			if slices.Contains(c.St.S.ForceReruns, d) {
+				r.Already = append(r.Already, d)
+				continue
+			}
+			c.St.S.ForceReruns = append(c.St.S.ForceReruns, d)
+			r.Queued = append(r.Queued, d)
+			continue
+		}
 		if slices.Contains(c.St.S.Reruns, d+"@"+schema.DailyPrompt) || slices.Contains(c.St.S.RerunQueue, d) {
 			r.Already = append(r.Already, d)
 			continue
@@ -56,6 +68,7 @@ func (c *Curator) QueueRerun(from, to, today string) (RerunRequest, error) {
 		r.Queued = append(r.Queued, d)
 	}
 	sort.Strings(c.St.S.RerunQueue)
+	sort.Strings(c.St.S.ForceReruns)
 	if len(r.Queued) > 0 {
 		if err := c.St.Save(); err != nil {
 			return RerunRequest{}, err
@@ -84,6 +97,7 @@ type RerunProgress struct {
 	Prompt  string   // the daily prompt the days are digested with
 	Done    []string // planned days digested with it
 	Waiting []string // planned days still to run
+	Forced  []string // days queued with force that still wait (they run before the others)
 	Paused  string   // why the passes wait, and until when ("" when they do not)
 }
 
@@ -91,7 +105,7 @@ type RerunProgress struct {
 func (c *Curator) RerunStatus() RerunProgress {
 	c.St.Lock()
 	defer c.St.Unlock()
-	p := RerunProgress{Prompt: schema.DailyPrompt}
+	p := RerunProgress{Prompt: schema.DailyPrompt, Forced: slices.Clone(c.St.S.ForceReruns)}
 	for _, d := range c.RerunPlan() {
 		if slices.Contains(c.St.S.Reruns, d+"@"+schema.DailyPrompt) {
 			p.Done = append(p.Done, d)
