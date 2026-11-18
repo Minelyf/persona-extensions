@@ -1,5 +1,13 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.32 (pre-release)
+
+- **Builds on an SDK copy from before candidate models.** The candidate parts of model.complete (`models`, `candidate`,
+  `attempts`, `model_candidates_failed`'s data) are declared in the extension (`internal/model/candidates.go`) rather
+  than taken from the SDK copy, so a repository that has not synced its SDK builds it unchanged. The calls on the wire
+  are the same as 0.2.0-beta.31's.
+- The size line's setting is titled 「长短分界」 (no implementation word in a setting's title).
+
 ## 0.2.0-beta.31 (pre-release)
 
 - **The hub runs the chain.** A call hands its whole chain (`model_primary`, then `model_long` or `model_short` by

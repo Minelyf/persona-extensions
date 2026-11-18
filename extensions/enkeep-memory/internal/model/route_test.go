@@ -27,10 +27,15 @@ type fakeHub struct {
 	limits  []int      // each call's timeout_seconds
 }
 
-func (f *fakeHub) call(_ context.Context, params any, out *wire.ModelCompleteResult) error {
-	p := params.(wire.ModelCompleteParams)
+func (f *fakeHub) call(_ context.Context, params, out any) error {
+	b, _ := json.Marshal(params)
+	var p struct {
+		Models  []string `json:"models"`
+		Timeout int      `json:"timeout_seconds"`
+	}
+	_ = json.Unmarshal(b, &p)
 	f.calls = append(f.calls, p.Models)
-	f.limits = append(f.limits, p.TimeoutSeconds)
+	f.limits = append(f.limits, p.Timeout)
 	if len(p.Models) > 0 && f.old {
 		return &ext.Error{Code: wire.ModelErrorCodeInvalidParams, Message: `model.complete: json: unknown field "models"`}
 	}
@@ -40,35 +45,44 @@ func (f *fakeHub) call(_ context.Context, params any, out *wire.ModelCompleteRes
 	}
 	if len(models) == 0 || f.off {
 		r, err := f.answers[""]()
-		*out = r
-		return err
+		if err != nil {
+			return err
+		}
+		return put(chainResult{ModelCompleteResult: r}, out)
 	}
-	var attempts []wire.ModelAttempt
+	var attempts []attempt
 	var last error
 	for _, m := range models {
 		a, ok := f.answers[m]
 		if !ok {
-			data, _ := json.Marshal(wire.ModelNotOffered{Model: m})
+			data, _ := json.Marshal(notOffered{Model: m})
 			last = &ext.Error{Code: wire.ModelErrorCodeModelUnavailable, Message: "model.complete: no provider offers " + m, Data: data}
-			attempts = append(attempts, wire.ModelAttempt{Model: m, Code: wire.ModelErrorCodeModelUnavailable, Message: "not offered"})
+			attempts = append(attempts, attempt{Model: m, Code: wire.ModelErrorCodeModelUnavailable, Message: "not offered"})
 			continue
 		}
 		r, err := a()
 		if err == nil {
-			r.Candidate, r.Attempts = m, attempts
-			*out = r
-			return nil
+			return put(chainResult{ModelCompleteResult: r, Candidate: m, Attempts: attempts}, out)
 		}
 		var e *ext.Error
 		errors.As(err, &e)
 		last = err
-		attempts = append(attempts, wire.ModelAttempt{Model: m, Code: e.Code, Message: e.Message, Seconds: 2})
+		attempts = append(attempts, attempt{Model: m, Code: e.Code, Message: e.Message, Seconds: 2})
 	}
 	if len(models) == 1 {
 		return last
 	}
-	data, _ := json.Marshal(wire.ModelCandidatesFailed{Attempts: attempts})
-	return &ext.Error{Code: wire.ModelErrorCodeModelCandidatesFailed, Message: "model.complete: every candidate failed", Data: data}
+	data, _ := json.Marshal(candidatesFailed{Attempts: attempts})
+	return &ext.Error{Code: codeCandidatesFailed, Message: "model.complete: every candidate failed", Data: data}
+}
+
+// put hands a result over as the hub's connection does: as JSON, decoded into what the caller reads.
+func put(v, out any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
 }
 
 func ok(model string) func() (wire.ModelCompleteResult, error) {
@@ -232,7 +246,7 @@ func TestRouteUsersOwnList(t *testing.T) {
 func TestRouteAssistantOffline(t *testing.T) {
 	rt, _ := testRoute(t)
 	calls := 0
-	h := Hub{Route: rt, call: func(context.Context, any, *wire.ModelCompleteResult) error {
+	h := Hub{Route: rt, call: func(context.Context, any, any) error {
 		calls++
 		return &ext.Error{Code: wire.ModelErrorCodeAssistantOffline, Message: "offline"}
 	}}
