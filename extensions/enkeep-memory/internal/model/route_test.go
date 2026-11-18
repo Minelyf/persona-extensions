@@ -227,7 +227,7 @@ func TestStatsPersist(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s := OpenStats(dir, time.Now())
+	s := OpenStats(dir, time.Now()).Snapshot()
 	if s.Calls != 3 || s.FellBack != 3 || s.Since != "2026-11-18T00:00:00Z" || s.Models["flash"].Failures[ReasonTimeout] != 3 {
 		t.Fatalf("reopened %+v", s)
 	}

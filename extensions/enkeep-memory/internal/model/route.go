@@ -317,7 +317,11 @@ func outcome(a Attempt) string {
 type Stats struct {
 	mu   sync.Mutex
 	path string
+	c    Counts
+}
 
+// Counts is what Stats counted: a plain value, safe to pass around.
+type Counts struct {
 	Since    string                 `json:"since"`
 	Calls    int                    `json:"calls"`     // calls through the chain or the old way
 	FellBack int                    `json:"fell_back"` // calls a fallback model answered
@@ -357,13 +361,13 @@ const StatsFile = "model-routes.json"
 func OpenStats(dir string, now time.Time) *Stats {
 	s := &Stats{path: filepath.Join(dir, StatsFile)}
 	if b, err := os.ReadFile(s.path); err == nil {
-		_ = json.Unmarshal(b, s)
+		_ = json.Unmarshal(b, &s.c)
 	}
-	if s.Since == "" {
-		s.Since = now.UTC().Format(time.RFC3339)
+	if s.c.Since == "" {
+		s.c.Since = now.UTC().Format(time.RFC3339)
 	}
-	if s.Models == nil {
-		s.Models = map[string]*ModelCount{}
+	if s.c.Models == nil {
+		s.c.Models = map[string]*ModelCount{}
 	}
 	return s
 }
@@ -371,24 +375,25 @@ func OpenStats(dir string, now time.Time) *Stats {
 func (s *Stats) add(c Call) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.Models == nil {
-		s.Models = map[string]*ModelCount{}
+	n := &s.c
+	if n.Models == nil {
+		n.Models = map[string]*ModelCount{}
 	}
-	s.Calls++
+	n.Calls++
 	switch {
 	case c.Legacy != "":
-		s.Legacy++
+		n.Legacy++
 	case c.FellBack && c.Answered != "":
-		s.FellBack++
+		n.FellBack++
 	}
 	if c.Answered == "" {
-		s.Failed++
+		n.Failed++
 	}
 	for i, a := range c.Attempts {
-		m := s.Models[a.Model]
+		m := n.Models[a.Model]
 		if m == nil {
 			m = &ModelCount{}
-			s.Models[a.Model] = m
+			n.Models[a.Model] = m
 		}
 		m.Attempts++
 		m.Secs += a.Secs
@@ -404,12 +409,12 @@ func (s *Stats) add(c Call) {
 			m.Failures[a.Reason]++
 		}
 	}
-	s.Recent = append(s.Recent, c)
-	if len(s.Recent) > recentCalls {
-		s.Recent = append([]Call(nil), s.Recent[len(s.Recent)-recentCalls:]...)
+	n.Recent = append(n.Recent, c)
+	if len(n.Recent) > recentCalls {
+		n.Recent = append([]Call(nil), n.Recent[len(n.Recent)-recentCalls:]...)
 	}
 	if s.path != "" {
-		if b, err := json.MarshalIndent(s, "", " "); err == nil {
+		if b, err := json.MarshalIndent(n, "", " "); err == nil {
 			_ = writeFile(s.path, b)
 		}
 		appendCall(filepath.Join(filepath.Dir(s.path), CallsFile), c)
@@ -436,18 +441,18 @@ func appendCall(path string, c Call) {
 	_, _ = f.Write(append(b, '\n'))
 }
 
-// Snapshot is a copy of the stats, safe to read while calls go on.
-func (s *Stats) Snapshot() Stats {
+// Snapshot is a copy of the counts, safe to read while calls go on.
+func (s *Stats) Snapshot() Counts {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b, _ := json.Marshal(s)
-	var c Stats
+	b, _ := json.Marshal(s.c)
+	var c Counts
 	_ = json.Unmarshal(b, &c)
 	return c
 }
 
 // Summary says the stats in a few lines: the calls, the fallback rate, and each model's attempts.
-func (s Stats) Summary() string {
+func (s Counts) Summary() string {
 	var b strings.Builder
 	rate := 0.0
 	if s.Calls > 0 {
