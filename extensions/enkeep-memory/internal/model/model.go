@@ -86,8 +86,8 @@ type Hub struct {
 	H         *ext.Hub
 	Extension string
 	Route     *Route // nil, or without models: every call on the purpose's model, as before 0.2.0-beta.30
-	// call makes one model.complete (tests replace it); nil: H.Call.
-	call func(ctx context.Context, params any, out *wire.ModelCompleteResult) error
+	// call makes one model.complete and decodes its result into out (tests replace it); nil: H.Call.
+	call func(ctx context.Context, params, out any) error
 }
 
 // callTimeout bounds one call, the hub's second try for a reply that does not match the schema included.
@@ -112,14 +112,11 @@ func timeout(r Request) int {
 	return callTimeout(r.Tier)
 }
 
-func (h Hub) do(ctx context.Context, params any) (wire.ModelCompleteResult, error) {
-	var out wire.ModelCompleteResult
+func (h Hub) do(ctx context.Context, params, out any) error {
 	if h.call != nil {
-		err := h.call(ctx, params, &out)
-		return out, err
+		return h.call(ctx, params, out)
 	}
-	err := h.H.Call(ctx, "model.complete", params, &out)
-	return out, err
+	return h.H.Call(ctx, "model.complete", params, out)
 }
 
 func (h Hub) Complete(ctx context.Context, r Request) (Response, error) {
@@ -131,7 +128,8 @@ func (h Hub) Complete(ctx context.Context, r Request) (Response, error) {
 
 // legacy is the call on the purpose's model, as before routes.
 func (h Hub) legacy(ctx context.Context, r Request) (Response, error) {
-	out, err := h.do(ctx, h.params(r))
+	var out wire.ModelCompleteResult
+	err := h.do(ctx, h.params(r), &out)
 	var e *ext.Error
 	if errors.As(err, &e) {
 		switch e.Code {
@@ -173,10 +171,10 @@ func response(r Request, out wire.ModelCompleteResult) Response {
 }
 
 // chained makes model.complete with the route's candidates (persona #10398).
-func (h Hub) chained(ctx context.Context, r Request, models []string) (wire.ModelCompleteResult, error) {
-	p := h.params(r)
-	p.Models = models
-	return h.do(ctx, p)
+func (h Hub) chained(ctx context.Context, r Request, models []string) (chainResult, error) {
+	var out chainResult
+	err := h.do(ctx, chainParams{ModelCompleteParams: h.params(r), Models: models}, &out)
+	return out, err
 }
 
 // Usage is what the calls cost in tokens, recorded per day and step for the report (there is no cap: the user

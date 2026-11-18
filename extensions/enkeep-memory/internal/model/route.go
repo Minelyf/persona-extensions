@@ -188,7 +188,7 @@ func reason(code, msg string) string {
 	return code
 }
 
-func failed(a wire.ModelAttempt) Attempt {
+func failed(a attempt) Attempt {
 	return Attempt{Model: a.Model, Reason: reason(a.Code, a.Message), Code: a.Code, Message: cut(a.Message, 160), Secs: a.Seconds}
 }
 
@@ -201,7 +201,7 @@ func cut(s string, n int) string {
 
 // complete sends r with its chain in one call; legacy sends it the old way. call makes model.complete with the
 // models given.
-func (rt *Route) complete(ctx context.Context, r Request, call func(context.Context, Request, []string) (wire.ModelCompleteResult, error),
+func (rt *Route) complete(ctx context.Context, r Request, call func(context.Context, Request, []string) (chainResult, error),
 	legacy func(context.Context, Request) (Response, error)) (Response, error) {
 	est := Estimate(r)
 	size := rt.Size(est)
@@ -242,7 +242,7 @@ func (rt *Route) complete(ctx context.Context, r Request, call func(context.Cont
 			rt.done(began, r, est, size, append(attempts, ans), "", false, note)
 			return Response{}, fmt.Errorf("%w: stop_reason refusal", ErrRefused)
 		}
-		resp := response(r, out)
+		resp := response(r, out.ModelCompleteResult)
 		if resp.Model == "" {
 			resp.Model = ans.Model
 		}
@@ -266,15 +266,15 @@ func (rt *Route) complete(ctx context.Context, r Request, call func(context.Cont
 		// The hub cannot run any model for the extension: the run waits, as before.
 		rt.done(began, r, est, size, []Attempt{{Model: strings.Join(chain, "|"), Reason: ReasonUnavailable, Code: e.Code, Message: cut(e.Message, 160), Secs: secs}}, "", false, "")
 		return Response{}, fmt.Errorf("%w: %s", ErrUnavailable, e.Message)
-	case wire.ModelErrorCodeModelCandidatesFailed:
-		var data wire.ModelCandidatesFailed
+	case codeCandidatesFailed:
+		var data candidatesFailed
 		_ = json.Unmarshal(e.Data, &data)
 		for _, a := range data.Attempts {
 			attempts = append(attempts, failed(a))
 		}
 	default: // one candidate, failing with its own code
 		m := chain[0]
-		var no wire.ModelNotOffered
+		var no notOffered
 		if e.Code == wire.ModelErrorCodeModelUnavailable && json.Unmarshal(e.Data, &no) == nil && no.Model != "" {
 			m = no.Model
 		}
