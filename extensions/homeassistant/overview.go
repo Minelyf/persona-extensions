@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"slices"
@@ -226,6 +227,10 @@ func (a *app) remoteTile(hm *home, rm remote, loc *time.Location) wire.Tile {
 	if a.canWrite("button", false) != nil {
 		return t
 	}
+	if rm.off != "" { // a switch (#774): what was sent last, the subtitle saying when; the menu sends either again
+		name, act := controlOf("ir", rm.on)
+		t.Control = &wire.RowControl{Kind: "switch", Name: name, On: remoteOn(hm, rm), Action: act}
+	}
 	t.Actions = append(t.Actions, wire.RowAction{Title: "开机", Icon: "power", Action: *rowDo(rm.on, "press")})
 	if rm.off != "" {
 		t.Actions = append(t.Actions, wire.RowAction{Title: "关机", Icon: "power", Action: *rowDo(rm.off, "press")})
@@ -234,6 +239,45 @@ func (a *app) remoteTile(hm *home, rm remote, loc *time.Location) wire.Tile {
 		t.Actions = append(t.Actions, wire.RowAction{Title: clip(buttonWord(hm, s), 20), Action: *rowDo(s.EntityID, "press")})
 	}
 	return t
+}
+
+// pressedAt is when a button was last pressed (its state), or zero: never, or offline.
+func pressedAt(hm *home, eid string) time.Time {
+	at, _ := time.Parse(time.RFC3339Nano, hm.ByID[eid].State)
+	return at
+}
+
+// remoteOn says a remote's 开机 was pressed after its 关机: an IR remote cannot tell whether the device is on, so its
+// switch shows what was sent last.
+func remoteOn(hm *home, rm remote) bool {
+	on := pressedAt(hm, rm.on)
+	return !on.IsZero() && on.After(pressedAt(hm, rm.off))
+}
+
+// remotePower runs a remote's switch (ctl:ir): on presses the 开机 button eid, off the same remote's 关机. Only a remote
+// the page draws a switch for (both buttons, in an area), so nothing but its own power buttons can be pressed.
+func (a *app) remotePower(ctx context.Context, eid, value string) (string, error) {
+	if value != "true" && value != "false" {
+		return "", errUnknownOp
+	}
+	reg := a.pageRegistry(ctx)
+	hm, err := a.home(ctx, statesFor)
+	if err != nil {
+		return "", err
+	}
+	hm = hm.named(reg)
+	for i := range hm.Areas {
+		for _, rm := range remotes(hm, reg, &hm.Areas[i]) {
+			if rm.on != eid || rm.off == "" {
+				continue
+			}
+			if value == "false" {
+				eid = rm.off
+			}
+			return a.rowCall(ctx, eid, "press")
+		}
+	}
+	return "", errNoEntity
 }
 
 // buttonWord is what a remote's button says: the last word of its name (红外空调控制 温度+ → 温度+).
