@@ -7,7 +7,7 @@
   "description": "微信机器人：通过公开 iLink 接口扫码绑定，在个人微信里和 Persona 对话；只转发绑定人的消息，支持图片、语音转写和正在输入。登录信息加密保存在 hub，升级无需重新扫码。",
   "publisher": "nwverse",
   "tags": ["聊天", "微信"],
-  "engines": {"persona": ">=202611041602", "plugin_protocol": 1},
+  "engines": {"persona": ">=202611202300", "plugin_protocol": 1},
   "runtime": {
     "command": {
       "linux-amd64": "bin/wechat-linux-amd64",
