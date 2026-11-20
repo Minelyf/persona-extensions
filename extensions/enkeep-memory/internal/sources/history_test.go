@@ -57,7 +57,7 @@ func TestHistorySessionsAreRead(t *testing.T) {
 		t.Fatalf("seen: %+v", k)
 	}
 	// Listed in full on another pass: the entry goes.
-	h.history.Gaps = nil
+	h.history.Gaps, h.history.Complete = nil, true
 	_ = agentRefs(t, s, st, "2026-11-03")
 	s.End(st, "2026-11-03", 1)
 	if _, ok := st.SessionHistory["2026-11-03"]; ok {
