@@ -25,4 +25,4 @@ Only your own fresh live messages qualify: another person mentioning you does no
 
 ## Pushes
 
-Turn on the channel's "Send notifications here too" or "Sync main chat turns started elsewhere" switch in the app to get what comes after an answer, such as a background task's report. Pushes go only to your own Feishu chat with yourself, never to a group or anybody else's chat, and end with the AI-answer marker.
+Turn on the channel's "Send notifications here too" (推送也发到这里) or "Sync main chat" (同步主对话) switch in the app to get what comes after an answer, such as a background task's report. Pushes go only to your own Feishu chat with yourself, never to a group or anybody else's chat, and end with the AI-answer marker.
