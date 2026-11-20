@@ -4,13 +4,13 @@
 
 This extension (id `larkx`) reaches Feishu as the user, next to the hub's own `lark-cli` integration (nwverse/persona#1487). It runs [LarkAgentX](https://github.com/cv-cat/LarkAgentX), a Python library for the Feishu web client, as a connector program: the user signs in with a QR code, every message arrives over the web client's long connection, the assistant can send as the user after a confirmation on the phone, and `/agent` in any chat hands a request to the assistant. It is an ordinary connector and channel program (Persona's `docs/connector-protocol.md` and `docs/extensions/channels.md`), so the hub needs no change.
 
-This page describes version 0.2.4. When the manifest shown in the install preview disagrees with this page, the manifest wins.
+This page describes version 0.2.6. When the manifest shown in the install preview disagrees with this page, the manifest wins.
 
 | Extension point | Contribution | Behavior |
 | --- | --- | --- |
 | `connectors` | `larkx` (飞书（LarkAgentX）) | Capabilities `status`, `tools`, `actions`, `events`, `inbox`, `archive`, `login`, `threads`, `fallback`. Inbox kinds `dm`, `mention`, `group`. `larkx_*` actions are `confirm_always`. |
 | `assistant` | `larkx` | Instructions in `assistant/instructions.md`: when to use `larkx_*` and when `lark-cli`. |
-| `channel` | `larkx` (飞书 /agent) | Kind `im`, on the `larkx` connector: the user's own `/agent` messages reach the assistant's chat, and the answers go back under them. Plain text, at most 4,000 characters. |
+| `channel` | `larkx` (飞书 /agent) | Kind `im`, on the `larkx` connector, with `push`: the user's own `/agent` messages reach the assistant's chat, and the answers go back under them. Pushes go only to the user's chat with themself. Plain text, at most 4,000 characters. |
 
 ## Before you use it
 
@@ -59,7 +59,9 @@ The machine the hub runs on needs Python 3.9 or newer with pip. Install the exte
 | Knowledge base | `archive.changes`; the cursor is a local row number, so nothing is delivered twice. The identity hint is `lark`. |
 | Assistant tools | `larkx_status`, `larkx_chats`, `larkx_messages`, `larkx_search`. |
 | Sending | `larkx_send` (to a chat; `reply_to` answers in a message's topic) and `larkx_send_dm` (a direct message to a person). |
-| `/agent` and self-mention | The user's own live message that starts with `/agent`, or contains a rich-text @ tag for that same signed-in account, goes to the hub with `channel.receive`, with the chat it was written in and the messages just before it. The self-mention is removed from the request; with no other text, the existing empty-request context behavior applies. Only a real @ tag counts, not an `@name` typed as plain text. The setting `agent_mention` is enabled by default; turning it off leaves `/agent` available. The answer comes back through `channel.send` and is posted as the user under the request, ending with an AI-answer mark. Only a reply to one of the user's own requests is sent (anything else is `cannot_send`), each once. Fetched history, old messages, other people's messages and the answers themselves never trigger it. |
+| `/agent` and self-mention | The user's own live message that starts with `/agent`, or contains a rich-text @ tag for that same signed-in account, goes to the hub with `channel.receive`, with the chat it was written in and the messages just before it. The self-mention is removed from the request; with no other text, the existing empty-request context behavior applies. Only a real @ tag counts, not an `@name` typed as plain text. The setting `agent_mention` is enabled by default; turning it off leaves `/agent` available. The answer comes back through `channel.send` and is posted as the user under the request, ending with an AI-answer mark. Only a reply to one of the user's own requests, or a push (below), is sent (anything else is `cannot_send`), each once. Fetched history, old messages, other people's messages and the answers themselves never trigger it. |
+
+**Pushes.** The channel declares `push`, so the hub can send what comes after an answer: a background task's report, a main-chat turn started elsewhere, a reminder. It sends them only after the user turns on the channel's "Send notifications here too" or "Sync main chat turns started elsewhere" switch in the app; both are off by default. A push has no `reply_to` and may carry anything the assistant knows, so it goes only to the user's own chat with themself (the direct chat opened with their own id), as the user, ending with the AI-answer mark. Before the first push of a sign-in, the program checks that this chat is a direct chat with nobody else in it. It never falls back to another chat: when the chat cannot be found or fails the check, the push is `cannot_send`. A send with `reply_to` still has to answer one of the user's own requests (#533).
 
 **Writes.** `confirm_always: ["larkx_*"]`: even an `allow` in `connector_gate` is held for the phone confirmation, so the assistant cannot send as the user without them. The confirmation names the recipient, quotes the message a reply answers, and shows the full text. A direct chat seen only through the user's own messages says it does not know the other person yet. A reply the user sends from the app goes through `inbox.reply`, where pressing send is the confirmation.
 

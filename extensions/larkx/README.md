@@ -22,3 +22,7 @@ Read this before installing:
 Write `/agent <what to do>`, or mention your own signed-in Feishu account with a real rich-text @ tag in your own message. The @ tag is removed from the request. A mention without any other text uses the same context-based request as an empty `/agent`.
 
 Only your own fresh live messages qualify: another person mentioning you does not invoke the assistant, and a reply ending with the configured AI-answer marker is ignored. Typing an `@name` as plain text is not a mention. Set **@自己唤起助手** (`agent_mention`, enabled by default) to `false` to allow only `/agent`. Answers to either kind of request appear under the original message with the configured AI-answer marker.
+
+## Pushes
+
+Turn on the channel's "Send notifications here too" or "Sync main chat turns started elsewhere" switch in the app to get what comes after an answer, such as a background task's report. Pushes go only to your own Feishu chat with yourself, never to a group or anybody else's chat, and end with the AI-answer marker.

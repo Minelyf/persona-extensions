@@ -59,6 +59,20 @@ def normalize(msg, extract_key):
     }
 
 
+def own_chat_ok(info):
+    """Whether a chat's info (chats.PullChatsByIdsRequest) is a direct chat with nobody but the user in it. Pure, for
+    the tests; counts it does not have are not taken as one."""
+    if not isinstance(info, dict) or info.get("type") not in (1, "P2P"):
+        return False
+    for count in ("memberCount", "userCount"):
+        try:
+            if int(info.get(count) or 0) > 1:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _mentions(data, text):
     """The AT elements' account ids and exact spans in the flattened text. Only this metadata identifies a real mention:
     an @-looking word, or at_me on somebody else's message, does not. Decoding the two known string fields here keeps
@@ -428,6 +442,12 @@ class RealBackend:
         if not chat:
             raise RuntimeError("建不了和这个人的私聊")
         return str(chat)
+
+    def own_chat(self):
+        """The user's chat with themself, where pushes go: the direct chat opened with their own id. Anything else is
+        refused, a group or a chat with somebody in it: a push may carry what only the user should read."""
+        chat = self.create_chat(str(self._auth.user_id))
+        return chat if own_chat_ok(self._client.get_chat_info(chat)) else None
 
     def search(self, query):
         return self._client.search(query)
