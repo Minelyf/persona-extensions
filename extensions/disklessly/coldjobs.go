@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -28,7 +29,13 @@ const (
 	jobRestore = "restore"
 	jobOffload = "offload"
 	jobInstall = "install"
+	jobBrew    = "brew"
+	jobScan    = "scan"
+	jobClean   = "clean"
 )
+
+// brewTimeout bounds a Homebrew install: tap, download and verify.
+const brewTimeout = 15 * time.Minute
 
 // coldJob is the running or last finished job of one machine.
 type coldJob struct {
@@ -37,7 +44,8 @@ type coldJob struct {
 	Started  time.Time
 	Finished time.Time // zero while running
 	Note     string    // the outcome
-	Err      string
+	Err      string    // why it failed, for people
+	Raw      string    // what the machine or the CLI said, for 详情
 }
 
 func (j coldJob) running() bool { return j.Finished.IsZero() }
@@ -70,6 +78,9 @@ type scratch struct {
 	orig Machine
 	scan *Scan
 	cold *ColdCatalog
+	// coldBefore is an independent baseline: cold may itself be edited in place by the job, so pointer comparison
+	// cannot distinguish a real change from an untouched scratch copy.
+	coldBefore *ColdCatalog
 }
 
 func scratchOf(st *State, m *Machine) *scratch {
@@ -81,6 +92,7 @@ func scratchOf(st *State, m *Machine) *scratch {
 	}
 	if c := st.cold(m.ID); c != nil {
 		sc.cold = cloneCold(c)
+		sc.coldBefore = cloneCold(c)
 		sc.st.setCold(m.ID, sc.cold)
 	}
 	return sc
@@ -105,8 +117,12 @@ func (sc *scratch) apply(st *State) {
 		}
 		st.Scans[m.ID] = s
 	}
-	if c := sc.st.Cold[m.ID]; c != nil {
-		st.setCold(m.ID, c)
+	if c := sc.st.Cold[m.ID]; !reflect.DeepEqual(c, sc.coldBefore) {
+		if c == nil {
+			st.dropCold(m.ID)
+		} else {
+			st.setCold(m.ID, c)
+		}
 	}
 	if len(sc.st.History) > 0 {
 		st.History = append(slices.Clone(sc.st.History), st.History...)
@@ -176,7 +192,7 @@ func (a *app) startJob(id, kind, label string, work jobWork) (started bool, cur 
 		job.Note = note
 		switch {
 		case werr != nil:
-			job.Err = werr.Error()
+			job.Err, job.Raw = humanizeErr(werr)
 		case uerr != nil:
 			job.Err = "保存结果失败：" + uerr.Error()
 		}
@@ -213,7 +229,7 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 	var targets []target
 	var entry *ColdEntry
 	var offer installOffer
-	var srcName string
+	var srcName, brew string
 	err := a.db().read(func(st *State) {
 		if action == "cold-refresh" && (machine == "" || machine == allMachines) {
 			for _, m := range st.Machines {
@@ -240,6 +256,10 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 			offer = installSourceFor(st, m)
 			if offer.src != nil {
 				srcName = machineLabel(offer.src)
+			}
+		case "cold-brew":
+			if cat := st.cold(m.ID); cat != nil {
+				brew = cat.Brew
 			}
 		}
 	})
@@ -334,6 +354,21 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 			return "", fmt.Errorf("可复制的来源已经变了（现在是 %s），请重新确认", srcName)
 		}
 		return a.startInstall(t.id, t.name, offer)
+
+	case "cold-brew":
+		if brew == "" {
+			return "", fmt.Errorf("「%s」上没有找到 Homebrew，没法用 Homebrew 安装；先点「重新检查 %s」，或按页面上的命令手动安装", t.name, t.name)
+		}
+		ok, cur, err := a.startJob(t.id, jobBrew, "正在用 Homebrew 安装 disklessly", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
+			return brewInstall(ctx, runner, sc, now)
+		})
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return busyNote(t.name, cur), nil
+		}
+		return "已开始在「" + t.name + "」上用 Homebrew 安装 disklessly，装好后自动重新检查", nil
 	}
 	return "", fmt.Errorf("unknown action %q", action)
 }
@@ -345,19 +380,7 @@ func (a *app) startInstall(id, name string, offer installOffer) (string, error) 
 	srcName := machineLabel(&src)
 	ver := cmp.Or(shortVersion(offer.cli.Version), "disklessly")
 	ok, cur, err := a.startJob(id, jobInstall, "正在从 "+srcName+" 复制安装 disklessly "+ver, func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
-		o, err := copyInstall(ctx, streamer, &src, sc.m, offer.cli.Home)
-		if err != nil {
-			return "", fmt.Errorf("从 %s 复制安装失败：%v", srcName, err)
-		}
-		note := "已从 " + srcName + " 复制安装 " + cmp.Or(o.version, ver)
-		if o.prev != "" {
-			note += "，原来的保留在 " + o.prev
-		}
-		if o.shadow != "" {
-			note += "；但这台电脑仍先找到 " + o.shadow + "，请删除它或调整 PATH 后再检查"
-		}
-		_, _ = RefreshColdIndex(ctx, runner, sc.st, sc.m, now)
-		return note, nil
+		return copyInstallWork(ctx, runner, streamer, &src, offer.cli, sc, now)
 	})
 	if err != nil {
 		return "", err
@@ -366,4 +389,65 @@ func (a *app) startInstall(id, name string, offer installOffer) (string, error) 
 		return busyNote(name, cur), nil
 	}
 	return "已开始从「" + srcName + "」复制安装到「" + name + "」，完成后自动重新检查", nil
+}
+
+// copyInstallWork copies cli from src to sc's machine, then re-reads that machine's cold index.
+func copyInstallWork(ctx context.Context, runner Runner, streamer StreamRunner, src *Machine, cli ColdCLI, sc *scratch, now time.Time) (string, error) {
+	srcName := machineLabel(src)
+	ver := cmp.Or(shortVersion(cli.Version), "disklessly")
+	o, err := copyInstall(ctx, streamer, src, sc.m, cli.Home)
+	if err != nil {
+		return "", fmt.Errorf("从 %s 复制安装失败：%w", srcName, err)
+	}
+	note := "已从 " + srcName + " 复制安装 " + cmp.Or(o.version, ver)
+	if o.prev != "" {
+		note += "，原来的保留在 " + o.prev
+	}
+	if o.shadow != "" {
+		note += "；但这台电脑仍先找到 " + o.shadow + "，请删除它或调整 PATH 后再检查"
+	}
+	_, _ = RefreshColdIndex(ctx, runner, sc.st, sc.m, now)
+	return note, nil
+}
+
+// brewInstall installs or upgrades the CLI with Homebrew on sc's machine, then re-reads it.
+func brewInstall(ctx context.Context, runner Runner, sc *scratch, now time.Time) (string, error) {
+	name := machineLabel(sc.m)
+	out, err := runner(ctx, sc.m, brewScript(), brewTimeout)
+	o := parseBrew(out)
+	switch {
+	case err != nil && !o.ok && o.step == "":
+		return "", err
+	case !o.ok:
+		return "", brewFailure(name, o)
+	}
+	ver := "disklessly " + cmp.Or(shortVersion(o.version), "（版本未知）")
+	note := "已用 Homebrew " + brewVerb(o.op) + " " + ver
+	if o.same {
+		note = "Homebrew 里的 " + ver + " 已是最新，没有重新下载"
+	}
+	if o.keg != "" {
+		note += "（" + o.keg + "）"
+	}
+	if o.bin != "" && !strings.Contains(o.binTo, "/Cellar/"+brewFormula+"/") && !strings.Contains(o.binTo, "/opt/"+brewFormula+"/") {
+		// Homebrew's bin/disklessly is someone else's (the Disklessly app's engine, say): a
+		// terminal with Homebrew on PATH runs that one; the extension's lookup prefers the keg.
+		other := o.bin
+		if o.binTo != "" {
+			other += " → " + o.binTo
+		}
+		if v := shortVersion(o.binVer); v != "" {
+			other += "（disklessly " + v + "）"
+		}
+		note += "；终端里（PATH 含 Homebrew 的 bin）用的仍是 " + other + "，扩展用的是 Homebrew 装的这个；想让终端也用它，运行 brew link --overwrite " + brewFQ
+	}
+	switch o.shadow {
+	case "":
+	case "?":
+		note += "；但检查脚本在 PATH 和常见位置都找不到它，把 Homebrew 的 bin 目录加进这台电脑的 PATH 后点「重新检查」"
+	default:
+		note += "；但这台电脑仍先找到 " + o.shadow + "（另一份 disklessly），删除它或把 Homebrew 的目录排到 PATH 前面后点「重新检查」"
+	}
+	_, _ = RefreshColdIndex(ctx, runner, sc.st, sc.m, now)
+	return note, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/convsrc"
 	"slices"
 	"sort"
 	"strings"
@@ -44,11 +45,20 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 		c.collectBegin(day)
 	}
 	units, err := c.units(ctx, day)
+	if errors.Is(err, convsrc.ErrAway) {
+		// The assistant's computer is not connected: the day cannot be read whole now. Not done; tried again after
+		// the same wait as when the model is unavailable, instead of only at the next start.
+		perr := c.notePauseOf(day, err, "assistant")
+		if !dry {
+			if serr := c.St.Save(); serr != nil {
+				return nil, serr
+			}
+			c.Publish()
+		}
+		return nil, perr
+	}
 	if err != nil {
 		return nil, err
-	}
-	if !dry {
-		c.collectEnd(day, len(units))
 	}
 	var m model.Model
 	var metered *model.Metered
@@ -99,12 +109,13 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 	}
 	var admitted []triage.Decision
 	modelDown := false
+	var downErr error // the hub's answer when the model was unavailable
 	for i := range decisions {
 		d := &decisions[i]
 		u := byRef[d.Chat]
 		if d.Action == triage.AI {
 			live.progress(func(p *Progress) { p.Done, p.Unit = i+1, u.Meta.Name })
-			c.aiTriage(ctx, m, u, d, owner, run, &modelDown)
+			c.aiTriage(ctx, m, u, d, owner, run, &modelDown, &downErr)
 		}
 		funnel.Chats[d.Rule+"→"+d.Action]++
 		funnel.Tokens[d.Action] += d.Tokens
@@ -159,13 +170,20 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 			}
 		}
 		if err != nil {
-			if errors.Is(err, model.ErrUnavailable) {
-				modelDown = true
+			// A unit the model could not read: unavailable, or an error that held after every fallback model. The day
+			// is not done either way (0.2.0-beta.33): what was read is kept, the rest waits and the day runs again from
+			// where it stopped, as when the model is away. Counting the unit as an error and finishing the day would
+			// mark the day read with the current prompt, and a rerun would then skip the unit for good.
+			modelDown, downErr = true, err
+			if h, ok := model.Held(err); ok {
+				// The hub held the model's connection past the call's wait: the unit goes back to the queue, not an error.
+				run.Notes = append(run.Notes, "模型等闸（hub 压闸："+h.Message+"）：没读完的段放回队列，闸开后这一天接着读")
+			} else if errors.Is(err, model.ErrUnavailable) {
 				run.Notes = append(run.Notes, "模型不可用（"+modelReason(err)+"）：只做了分拣和确定性检查")
-				continue
+			} else {
+				run.Notes = append(run.Notes, fmt.Sprintf("%s：%v（这一天稍后从这里接着读）", u.Meta.Name, err))
+				run.Counts["digest_errors"]++
 			}
-			run.Notes = append(run.Notes, fmt.Sprintf("%s：%v", u.Meta.Name, err))
-			run.Counts["digest_errors"]++
 			continue
 		}
 		live.progress(func(p *Progress) { p.Refused = len(run.Refusals) })
@@ -175,8 +193,23 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 			}
 		}
 	}
-	if modelDown && !slices.ContainsFunc(run.Notes, func(n string) bool { return strings.Contains(n, "模型不可用") }) {
-		run.Notes = append(run.Notes, "模型不可用：只做了分拣和确定性检查")
+	if m != nil && modelDown {
+		// The model went away before every admitted unit was read (or before the rules' open cases were triaged): the
+		// day is not done. What was read is kept; the day runs again when the model is back, from where it stopped.
+		if downErr == nil {
+			downErr = model.ErrUnavailable
+		}
+		err := c.notePause(day, downErr)
+		if !dry {
+			if serr := c.St.Save(); serr != nil {
+				return nil, serr
+			}
+			c.Publish()
+		}
+		return nil, err
+	}
+	if m != nil && !dry {
+		c.clearPause()
 	}
 	// 3. Consolidation (design 5.0): the day's new entries recalled, judged and filed, counted, statuses settled.
 	if len(units) > 0 {
@@ -197,7 +230,21 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 	// 4. Proposals that a day can already make, and the queue's upkeep; commitments past due are flagged (5.4).
 	c.expire()
 	c.markCommitments(day, run)
-	c.afterDaily(ctx, m, day, run, dry) // signals and the ledger, then the exits (curate/exits.go)
+	if err := c.afterDaily(ctx, m, day, run, dry); err != nil { // signals and the ledger, then the exits (curate/exits.go)
+		// The hub held the model past a call's wait (model.ErrPaused): the day stays open, as when a unit could not
+		// be read; the next pass runs it again from here (what was kept is not asked again).
+		perr := c.notePause(day, err)
+		if serr := c.St.Save(); serr != nil {
+			return nil, serr
+		}
+		c.Publish()
+		return nil, perr
+	}
+	if !dry {
+		// Commit source cursors and ActiveDays only after the whole day completed. In particular, the model-down return
+		// above leaves them untouched so a retry rereads everything the model could not summarize.
+		c.collectEnd(day, len(units))
+	}
 	if metered != nil {
 		run.Counts["model_calls"] = metered.Calls
 	}
@@ -230,7 +277,7 @@ func sourceOf(u *Unit) string {
 
 // aiTriage asks the model about a unit the rules could not place, unless a tag for the same signals is less than a
 // week old. Without a model (or when its answer fails the checks) the unit is kept for the week, not dropped.
-func (c *Curator) aiTriage(ctx context.Context, m model.Model, u *Unit, d *triage.Decision, owner []string, run *store.Run, down *bool) {
+func (c *Curator) aiTriage(ctx context.Context, m model.Model, u *Unit, d *triage.Decision, owner []string, run *store.Run, down *bool, why *error) {
 	fp := triage.Fingerprint(triage.Chat{Meta: u.Meta}, *d)
 	if t := c.St.S.Triage[u.Ref]; t != nil && t.Fingerprint == fp && t.At >= addDays(u.Day, -7) {
 		c.applyTag(u, d, t.Admit, t.Category, t.Reason+"（缓存）")
@@ -248,10 +295,10 @@ func (c *Curator) aiTriage(ctx context.Context, m model.Model, u *Unit, d *triag
 		in.Lines = append(in.Lines, schema.MsgLine{N: l.N, Time: l.Time, Speaker: l.Speaker, Text: l.Body})
 	}
 	resp, err := m.Complete(ctx, model.Request{Step: "triage", Tier: tier(c.Cfg.DailyTier), System: prompts.Triage,
-		User: schema.Must(in), MaxTokens: 400, Schema: prompts.TriageSchema})
+		User: schema.Must(in), MaxTokens: 4000, Schema: prompts.TriageSchema})
 	if err != nil {
 		if errors.Is(err, model.ErrUnavailable) {
-			*down = true
+			*down, *why = true, err
 		}
 		if errors.Is(err, model.ErrRefused) { // only a decision about the unit: no need to split it, the week reads it
 			r := c.refusal("triage", u, lineNumbers(head), err)

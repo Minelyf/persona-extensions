@@ -1,5 +1,178 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.34 (pre-release)
+
+- **Sessions seen before are read on reruns.** A runtime lists only its recent sessions (enkeep: active in the last 7
+  days, at most 80), so a rerun or replay of an older day did not find that day's agent sessions in the hub's list.
+  Every session a pass found in the list is now kept (`seen_sessions` in the state: name, start, last active day) and
+  a day up to its last active day reads it too; sessions read before this version are known from their cursors and the
+  units a day admitted. The hub forwards a session's items to its runtime whether it lists it or not. Any runtime's
+  sessions, not one's in particular. A session no pass ever listed is still not known.
+- **The hub's session history is read** (nwverse/persona#11529: `GET /api/v1/sessions?include_inactive=1&since=…`):
+  every pass also lists the sessions active from the day's start on, archived, finished and offline ones too, every
+  page, and reads them with the live list's and the ones seen before, each once. Scheduled runs (`origin`
+  `automation`, or no message of the user's) are left out; sessions that do not say (the node's own Claude Code and
+  Codex sessions) are read, their speakers told apart as before. A source that did not list the window in full (not
+  honored: unsupported, failed, node_unsupported, offline; or not complete) is recorded for the day and named by
+  `enkeep_rerun_status` (day, machine, source, reason); its sessions are read as far as the live list and the seen
+  ones have them, and a later pass of the day (a rerun) fills them in. A hub without session history (no `history` in
+  its answer, or the query turned down) is read as before, and the status says so. A history row whose items the
+  hub no longer lets the extension read (it keeps that for a day, in memory) is listed again and read once more.
+  A session read from its start is not asked for on days before its first item.
+- **A rerun of a day adds to what it admitted.** Before, it replaced the day's list of admitted units, so the units an
+  earlier run read and the rerun no longer saw were dropped from it. Forgetting a source takes its units off every day.
+- **A hold of the hub (`model_paused`) is a wait, not a failure.** The call waits until the hold lets go (the hub's
+  `until`, at most 5 minutes a wait, 10 minutes a call, ending with the run) and asks the whole chain again, rather
+  than count every candidate as unavailable. A call still held then puts its unit back: the day stays open and runs
+  again when the hold lets go (daily, triage, consolidation, signals and exits alike), with no failure counted and no
+  error logged; the exits stay as they were rather than go out with lines missing. `enkeep_rerun_status` counts holds
+  apart from unanswered calls; the page says the day waits for the hold.
+
+## 0.2.0-beta.33 (pre-release)
+
+- **A unit the model could not read keeps its day open.** Before, a unit whose call failed with an error other than
+  the model being unavailable was counted in `digest_errors` and passed over, and the day was finished and marked read
+  with the current prompt, so a rerun skipped the unit for good. Now the day is not done, as when the model is away:
+  what was read is kept, the pass waits with the same backoff, and the day runs again from where it stopped.
+- **A chain with a candidate not offered and one not matching the schema** (`model_candidates_failed` with only
+  `model_unavailable` and `invalid_output`) asks the purpose's model the old way, whose reply comes back even when it
+  does not match, for the step's own checks of each item, as when every candidate did not match. Before, the call
+  failed and the unit went unread. Seen live: Gemini not offered, Haiku adding a `summary_placeholder` key to a
+  summary point. That key is the model's, not the schema's (every summary point is `{text, evidence}` with
+  `additionalProperties: false`); the daily prompt will say so with its next version, and the item checks already
+  keep a point's text and evidence and drop the rest.
+- **`enkeep_rerun` takes `force: true`**: the days are read again even if they already carry the current prompt's
+  marker (still past days only, at most 31 per call). Units read before come from the ledger, so only what was not
+  read calls the model. `enkeep_rerun_status` lists the days waiting with force; a day leaves the list once its daily
+  run completes.
+
+## 0.2.0-beta.32 (pre-release)
+
+- **Builds on an SDK copy from before candidate models.** The candidate parts of model.complete (`models`, `candidate`,
+  `attempts`, `model_candidates_failed`'s data) are declared in the extension (`internal/model/candidates.go`) rather
+  than taken from the SDK copy, so a repository that has not synced its SDK builds it unchanged. The calls on the wire
+  are the same as 0.2.0-beta.31's.
+- The size line's setting is titled 「长短分界」 (no implementation word in a setting's title).
+
+## 0.2.0-beta.31 (pre-release)
+
+- **The hub runs the chain.** A call hands its whole chain (`model_primary`, then `model_long` or `model_short` by
+  size) to model.complete's `models` (persona #10398), and the hub tries the candidates in order. Each candidate may
+  take `model_timeout` seconds (180; the schema's second try included), which replaces 0.2.0-beta.30's
+  `model_primary_timeout`. What is counted and logged is what the hub says: the candidate that answered, the model the
+  upstream named, and each failed candidate's code and reason from `attempts` / `model_candidates_failed`. When the
+  user switched the lists off or replaced them on the purpose, the call is noted "candidates off" or "the user's own
+  list". When no candidate matched the schema, the purpose's model is asked the old way and its reply goes to the
+  step's own checks, as before. A hub without `models` still gets the old call.
+- The SDK copy is synced from persona f7c715f076 (`ModelCompleteParams.Models`, `ModelAttempt`,
+  `ModelCandidatesFailed`, `ModelNotOffered`).
+
+## 0.2.0-beta.30 (pre-release)
+
+- **Model routes: a primary model first, a fallback by length.** On a hub whose model.complete takes `models`, every
+  text step (daily extraction and triage, weekly consolidation and synthesis, people cards, signals, exit rewriting)
+  asks `model_primary` first (none by default: set it to the connection's fast model, a Flash-class one, say). When it fails (an error, a timeout after
+  `model_primary_timeout`, 120 s; an empty answer; an answer that does not match the schema; a refusal; the model
+  paused), the call goes to `model_long` (default `claude-sonnet-5-5`) if its estimated size is above
+  `model_long_above` (16000 tokens), else to `model_short` (default `claude-haiku-5-5`). The estimate is the input
+  (system prompt, user turn and schema: a quarter token per ASCII byte, one per other character) plus the room the
+  step asks for its answer (`max_tokens`). On a hub without `models`, or when none of the route's models is on the
+  connection, a call runs on the purpose's model as before; `model_route: purpose` turns the route off. The exits'
+  format does not change. See [docs/model-routes.md](docs/model-routes.md).
+- **Each call is counted and logged.** `enkeep_rerun_status` ends with the route and its counts: calls, fallback
+  rate, unanswered calls, calls sent the old way, and per model the attempts, answers, failures by reason and average
+  time. `model-routes.json` keeps the counts and the last 50 calls, `model-calls.jsonl` a line per call (models tried,
+  why each failed, which answered; never what was sent or answered).
+
+## 0.2.0-beta.29 (pre-release)
+
+- **`enkeep_resettle`: settle every entry's status again, as a tool.** The assistant and Agents can call it on the
+  `enkeep` connector. It settles every entry (dormant ones too) as of today on the real active days: an active day the
+  run ledger proves was never read with the model (daily runs, none with a model call) and no entry rests on is not
+  counted, since such days put entries to sleep early before 0.2.0-beta.21. `dry_run` (the default) changes nothing,
+  not even the event log, and reports the five statuses before and after, the stable entries per facet and what
+  would move; `dry_run: false` applies it. A second call moves nothing. It deletes nothing.
+- **Done reruns leave the queue.** Once the queued days are all digested with the current prompt and filed, they are
+  taken out of the `enkeep_rerun` queue; their markers stay, so asking for them again still queues nothing, and
+  `enkeep_rerun_status` lists only `rerun_range`'s days and what still waits.
+
+## 0.2.0-beta.28 (pre-release)
+
+- **The rerun tools reach the assistant and Agents.** In 0.2.0-beta.27 the connector was `enkeepmemory` and its tools
+  `enkeep_rerun` / `enkeep_rerun_status`; the hub keeps only a connector's tools whose names start with its id and
+  "_", so it dropped both and no conversation saw them. The connector is now `enkeep`. A test runs the hub's own
+  connector checks (`exttest.CheckConnectors`), which fail on such a name.
+- The program declares its connector when it starts, as the manifest does; the hub no longer logs that it fell back
+  to the manifest's.
+
+## 0.2.0-beta.27 (pre-release)
+
+- **Reruns are a tool, not only a setting.** The assistant and coding Agents can call `enkeep_rerun` (`from`, `to`:
+  days to read again with the current daily prompt) and `enkeep_rerun_status` (what is done, what waits, what runs
+  now, whether the passes wait for the model or the assistant's computer), through the extension's connector
+  `enkeepmemory` (capability `tools`; `agent_tools: enkeep_*`). A call queues the days in the state and returns at
+  once; they run as `rerun_range`'s do: one at a time in the background, completed days only, each at most once per
+  prompt version, waiting while the model or the assistant's computer is away. At most 31 days per call. A rerun
+  reads the user's own sources again inside the extension, sends nothing and deletes nothing, and what it finds goes
+  through the same thresholds and review as any day's, so it is a tool rather than a gated write. `rerun_range` (the
+  setting) works as before.
+
+## 0.2.0-beta.26 (pre-release)
+
+- **A day the assistant's computer is away for is tried again after a wait.** When the assistant's conversations
+  cannot be read because its computer is not connected, the day's pass ends unfinished and waits like when the model
+  is unavailable (`model_pause`, now with `what: assistant`), then tries the same day again; before, the day was only
+  tried again at the plugin's next start, so a rerun range could pass over it. The page says the assistant's computer
+  is not connected, not that the model is unavailable.
+
+## 0.2.0-beta.25 (pre-release)
+
+- **A unit an upstream turns down is split, not lost.** An OpenAI-style upstream answers some requests with HTTP 400
+  "the request was rejected as invalid" for what they contain (seen with a GPT model on a group chat: the whole unit
+  was lost for the day). That reply, and the hub's `model_refused` code, now count as a refusal: the unit is read
+  again in smaller parts, and a part refused at the smallest size is recorded as skipped, as for any refusal.
+
+## 0.2.0-beta.24 (pre-release)
+
+- **People pages carry the user's own words and the inferred profile too.** The hub's privacy filter
+  (nwverse/persona#6119) keeps a profile's private parts (`[用户原话]`, `[推断·仅供参考]`) out of conversations that
+  write to other people: inbox drafting, the Lark agent and conversations an extension opens. With it, an accepted
+  person card writes its evaluations and inferences to the knowledge base as well, not only facts and commitments
+  (`ProfileViewsReleased`). `engines.persona` asks for a hub built with the filter (`>=202611122324`); a development
+  build (0) is not checked. Not covered by the hub's filter, as #6119 says: a conversation reading `profiles.json`
+  with its own file tools, an extension's own MCP tools, and paraphrases.
+
+## 0.2.0-beta.22 (pre-release)
+
+Ready for a GPT model on the knowledge-base purpose (tried with gpt-6-luna).
+
+- **An observation without its sentence is not lost.** A model that fills a judgement's or a way's fields
+  (situation, choice, rejected, why; a machine's pitfall and fix) and leaves `text` out gets the sentence made of
+  those fields, nothing added. `text` is no longer required by the daily schema, so the hub does not refuse the
+  whole answer for it; an observation whose fields do not say enough is still a schema rejection. The prompt
+  (`daily/15`) says every observation has `text`, also when the fields are filled. On two replayed days gpt-6-luna
+  left `text` out of 35 of 172 answers.
+- **A reply that does not match the schema is read, not dropped.** When the hub returns `invalid_output` after its
+  second try, the reply it carries is taken and each item is checked on its own, as for any answer; before, the
+  whole unit was lost for the day.
+- **Room for a reasoning model.** The smallest answer limits (triage 400, weekly 1500, dig and rewrite 2000 tokens)
+  are 4000: a reasoning model counts its reasoning in `max_completion_tokens` and could be cut off before answering.
+
+## 0.2.0-beta.21 (pre-release)
+
+- **A day the model is unavailable to is not done.** When the hub cannot run the model (model.complete busy or
+  unavailable) before every admitted unit of a day was read, the day's pass ends with `ErrModelDown` instead of
+  finishing on triage alone: no finished run is recorded, the first-run replay stays on that day, and a rerun_range
+  day is not marked rerun. What was read before is kept (the state is saved after every unit). The passes then wait
+  (`model_pause` in the state) 10 minutes, doubling up to 2 hours, and try the same day again; the first pass that
+  reaches the model clears the pause and the replay goes on from there. Before, a replay ran on through days with
+  no model and counted them as read.
+- The plugin page says so: "模型暂时不可用" for the first failures, "模型不可用，暂停中" after three in a row, with
+  the hub's reason, since when, the next try and the day it resumes from.
+- A hub with no model configured for the extension still triages and checks without one, as before.
+- Offline replay: a gateway's 429 (no capacity) through `-pi` counts as the model unavailable, so a replay stops on
+  that day instead of reading on without the model.
+
 ## 0.2.0-beta.20 (pre-release)
 
 - **Agent cursors cover trailing folds.** A day ending in `Fold[From..To]` resumes after `To`, so a folded Hub or

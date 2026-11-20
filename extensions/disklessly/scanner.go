@@ -35,11 +35,21 @@ func DefaultRunner(ctx context.Context, m *Machine, script string, timeout time.
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// When the time is up only the shell is killed: a du or find it started still holds stdout, and Run would wait
+	// for it to finish (minutes on a large cache). WaitDelay closes the pipes and returns what was read by then.
+	cmd.WaitDelay = runnerWaitDelay
 	if err := cmd.Run(); err != nil {
 		return stdout.String(), runError(m, err, stderr.String())
 	}
 	return stdout.String(), nil
 }
+
+// runnerWaitDelay is how long a run waits, after its time is up and the shell was killed, for the programs the shell
+// started to let go of its output; tests shorten it.
+var runnerWaitDelay = 5 * time.Second
+
+// probeTimeout bounds one scan's probe script; tests shorten it.
+var probeTimeout = 90 * time.Second
 
 // runError words a failed run like the scan does: an SSH failure names the host.
 func runError(m *Machine, err error, stderr string) error {
@@ -56,7 +66,7 @@ func runError(m *Machine, err error, stderr string) error {
 // shellCommand runs /bin/sh with localArgs on this machine, or remote (the command line the
 // remote login shell runs) over OpenSSH with BatchMode=yes.
 func shellCommand(ctx context.Context, m *Machine, remote string, localArgs ...string) (*exec.Cmd, error) {
-	if m == nil || m.IsLocal || isSelfHostAlias(m.Host) {
+	if m == nil || m.IsLocal || isLocalConnection(m.Host, m.Port) {
 		return exec.CommandContext(ctx, "/bin/sh", localArgs...), nil
 	}
 	if !IsConcreteHost(m.Host) {
@@ -575,14 +585,21 @@ func ScanMachine(ctx context.Context, runner Runner, st *State, m *Machine, now 
 	if runner == nil {
 		runner = DefaultRunner
 	}
-	out, err := runner(ctx, m, ProbeScript, 90*time.Second)
-	if err != nil {
-		m.Reachable = false
-		m.LastError = err.Error()
-		m.UpdatedAt = now
-		return nil, err
-	}
+	out, err := runner(ctx, m, ProbeScript, probeTimeout)
 	scan := ParseProbeOutput(m, out, now)
+	if err != nil {
+		// The probe reads the root volume first and sizes caches after it. On a computer with large caches the sizing
+		// can outlast the probe's time: the watermark it already read is kept, and the caches are marked partial. A
+		// probe that stopped before its df line was whole has no watermark (a cut line parses to no volume) and fails.
+		if scan.Mount.TotalBytes == 0 {
+			m.Reachable = false
+			m.LastError = err.Error()
+			m.UpdatedAt = now
+			return nil, err
+		}
+		scan.Partial = true
+		scan.PartialReason = err.Error()
+	}
 	m.Reachable = true
 	m.LastError = ""
 	if scan.Platform != "" {
@@ -597,7 +614,7 @@ func ScanMachine(ctx context.Context, runner Runner, st *State, m *Machine, now 
 		st.Scans = map[string]*Scan{}
 	}
 	st.Scans[m.ID] = scan
-	if scan.BinaryVersion != "" || scan.Sessions.CLIReady {
+	if !scan.Partial && (scan.BinaryVersion != "" || scan.Sessions.CLIReady) {
 		// Keep the local cold index current without pulling the index on every scan; a failed
 		// refresh only marks the cloud state unknown.
 		refreshColdIfStale(ctx, runner, st, m, now, coldScanRefreshAge)
@@ -638,10 +655,10 @@ func applySessionCLI(sess *SessionSummary, sections map[string][]string) []ScanI
 	sess.CLIReady = planOK && sess.Cloud != nil
 	switch {
 	case !sess.CLIReady:
-		sess.Note = "目标机器没有支持云端归档的 disklessly CLI（需要 sessions status 与 --exclude-from），冷会话保持原样；安装或升级 disklessly 后重新扫描。"
+		sess.Note = "这台电脑上没有能上传冷会话的 disklessly CLI，冷会话保持原样；到「Agent 对话」页用 Homebrew 安装或升级 disklessly 后重新扫描。"
 		return nil
 	case !sess.Cloud.Backend.Reachable:
-		sess.Note = "备份后端不可达，冷会话暂不归档：" + cmpOr(sess.Cloud.Backend.Error, "backend unreachable")
+		sess.Note = "备份后端连不上，冷会话暂不上传；确认后端在线后重新扫描。"
 	}
 
 	kb := map[string]uint64{}
