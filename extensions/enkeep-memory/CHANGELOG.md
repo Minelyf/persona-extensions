@@ -1,5 +1,22 @@
 # enkeep-memory changelog
 
+## 0.2.0-beta.34 (pre-release)
+
+- **Sessions seen before are read on reruns.** A runtime lists only its recent sessions (enkeep: active in the last 7
+  days, at most 80), so a rerun or replay of an older day did not find that day's agent sessions in the hub's list.
+  Every session a pass found in the list is now kept (`seen_sessions` in the state: name, start, last active day) and
+  a day up to its last active day reads it too; sessions read before this version are known from their cursors and the
+  units a day admitted. The hub forwards a session's items to its runtime whether it lists it or not. Any runtime's
+  sessions, not one's in particular. A session no pass ever listed is still not known.
+- **A rerun of a day adds to what it admitted.** Before, it replaced the day's list of admitted units, so the units an
+  earlier run read and the rerun no longer saw were dropped from it. Forgetting a source takes its units off every day.
+- **A hold of the hub (`model_paused`) is a wait, not a failure.** The call waits until the hold lets go (the hub's
+  `until`, at most 5 minutes a wait, 10 minutes a call, ending with the run) and asks the whole chain again, rather
+  than count every candidate as unavailable. A call still held then puts its unit back: the day stays open and runs
+  again when the hold lets go (daily, triage, consolidation, signals and exits alike), with no failure counted and no
+  error logged; the exits stay as they were rather than go out with lines missing. `enkeep_rerun_status` counts holds
+  apart from unanswered calls; the page says the day waits for the hold.
+
 ## 0.2.0-beta.33 (pre-release)
 
 - **A unit the model could not read keeps its day open.** Before, a unit whose call failed with an error other than
