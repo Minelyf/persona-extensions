@@ -82,6 +82,13 @@ def rich_text(rich):
     drops an A element whole, its title and its address: a pasted Feishu doc link reached Persona as the words around
     it (2026-11-12). A link is its title, a space and its address (the address alone when the title is it or empty).
     None when the message has no link, so LarkAgentX's own text stays (and so does an empty result)."""
+    linked = _linked(rich)
+    return linked[0] if linked else None
+
+
+def _linked(rich):
+    """rich_text's text and the AT elements' spans in that same text ({id, start, end, label}, as _mentions gives them
+    for LarkAgentX's text), or None when the message has no link."""
     try:
         dictionary = rich["elements"]["dictionary"]
     except (KeyError, TypeError):
@@ -96,16 +103,16 @@ def rich_text(rich):
             ordered = [v for _, v in sorted(dictionary.items(), key=lambda item: int(item[0]))]
         except ValueError:
             ordered = list(dictionary.values())
-    text, after_link = "", False
+    text, after_link, spans = "", False, []
     for v in ordered:
         tag, prop = v.get("tag", 1), v.get("property")
         if not prop:
             continue
-        piece = None
+        piece, user_id = None, ""
         if tag in _TEXT_TAGS:
             piece = _string(prop, 1) + ("\n" if tag == _PARAGRAPH else "")
         elif tag == _AT:
-            piece = _string(prop, 2) or None  # AtProperty.content
+            user_id, piece = _string(prop, 1), _string(prop, 2) or None  # AtProperty.userId, .content
         elif tag == _ANCHOR:
             # AnchorProperty is not in LarkAgentX's proto.proto (only Tag.A = 6 and RichText.anchorIds = 7); its fields
             # are LarkAgentX's lark_all_pb2 entities.RichTextElement.AnchorProperty at the pinned commit: href 1,
@@ -118,11 +125,15 @@ def rich_text(rich):
                 piece = " " + piece
         if piece is None:
             piece = _PLACEHOLDERS.get(tag, "")
-        if after_link and piece and not piece[0].isspace():
+        spaced = after_link and bool(piece) and not piece[0].isspace()
+        if spaced:
             piece = " " + piece  # an address glued to the next words is a different address
+        if tag == _AT and user_id:
+            start = len(text) + (1 if spaced else 0)
+            spans.append({"id": user_id, "start": start, "end": len(text) + len(piece), "label": piece[1:] if spaced else piece})
         text += piece
         after_link = tag == _ANCHOR and bool(piece)
-    return text
+    return text, spans
 
 
 def normalize(msg, extract_key):
@@ -132,10 +143,16 @@ def normalize(msg, extract_key):
     data = msg.get("content_data") or {}
     key = extract_key(msg_type, data) if isinstance(data, dict) else ""
     text = msg.get("content") or ""
-    if name in ("TEXT", "POST") and isinstance(data, dict):
-        linked = rich_text(data.get("richText"))
-        if linked:  # an empty rebuild keeps LarkAgentX's text, as its own `extract_rich_text(...) or text` does
-            text = ("[富文本] %s\n%s" % (data.get("title", ""), linked)).strip() if name == "POST" else linked
+    mentions = _mentions(data, text)
+    linked = _linked(data.get("richText")) if name in ("TEXT", "POST") and isinstance(data, dict) else None
+    if linked and linked[0]:  # an empty rebuild keeps LarkAgentX's text, as its own `extract_rich_text(...) or text` does
+        head = "[富文本] %s\n" % data.get("title", "") if name == "POST" else ""
+        text = (head + linked[0]).strip() if head else linked[0]
+        # The spans follow the text the connector keeps: shifted past a POST's title line, and none at all when one
+        # does not land on its label (the message is then no self-mention, never a wrong one).
+        mentions = [dict(m, start=m["start"] + len(head), end=m["end"] + len(head)) for m in linked[1]]
+        if any(text[m["start"]:m["end"]] != m["label"] for m in mentions):
+            mentions = []
     media = []
     if name in ("IMAGE", "STICKER") and key:
         media = [{"kind": name.lower(), "key": key}]
@@ -149,14 +166,13 @@ def normalize(msg, extract_key):
     if at > 1e12:
         at /= 1000
     root = msg.get("root_id") or ""
-    text = msg.get("content") or ""
     return {
         "id": str(msg.get("msg_id") or ""), "chat": str(msg.get("chat_id") or ""),
         "chat_kind": "dm" if msg.get("chat_type") == 1 else "group",
         "position": int(msg.get("position") or 0), "sender": str(msg.get("from_id") or ""), "type": name,
         "text": text, "at": at or time.time(), "root": "" if root == "0" else root,
         "parent": msg.get("parent_id") or "", "at_me": bool(msg.get("at_me")), "media": media,
-        "mentions": _mentions(data, text),
+        "mentions": mentions,
     }
 
 

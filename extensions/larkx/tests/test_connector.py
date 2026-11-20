@@ -13,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from larkx_persona.connector import DM_UNKNOWN, KEEP_DAYS, Connector  # noqa: E402
+from larkx_persona.connector import DM_UNKNOWN, KEEP_DAYS, Connector, mention_request  # noqa: E402
 from larkx_persona.real import normalize  # noqa: E402
 from larkx_persona.store import Store  # noqa: E402
 from larkx_persona.wire import RpcError  # noqa: E402
@@ -614,6 +614,31 @@ class NormalizeTest(unittest.TestCase):
         data = self.rich((6, self.prop((1, "https://example.com/old"), (1, "https://example.com/new"))))
         m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "", "content_data": data}, self.key)
         self.assertEqual(m["text"], "https://example.com/new")
+
+    def test_a_link_and_a_self_mention_share_one_text(self):
+        # The spans follow the text with its link: a span counted in LarkAgentX's text, which has no link, would miss.
+        url = "https://example.com/c"
+        data = self.rich((1, self.prop((1, "看 "))), (6, self.prop((1, url), (3, url))), (5, self.prop((1, "7001"), (2, "@Example"))),
+                         (1, self.prop((1, " 总结一下"))))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "看 @Example 总结一下", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "看 " + url + " @Example 总结一下")
+        self.assertEqual(m["mentions"], [{"id": "7001", "start": len("看 " + url + " "), "end": len("看 " + url + " @Example"),
+                                          "label": "@Example"}])
+        self.assertEqual(mention_request(m["text"], m["mentions"], "7001"), "看 " + url + "  总结一下")
+
+    def test_a_post_with_a_link_shifts_its_spans_past_the_title(self):
+        url = "https://example.com/d"
+        data = self.rich((5, self.prop((1, "7001"), (2, "@Example"))), (1, self.prop((1, " 看 "))), (6, self.prop((1, url))))
+        data["title"] = "周报"
+        m = normalize({"msg_type": 4, "msg_type_name": "POST", "content": "[富文本] 周报\n@Example 看 ", "content_data": data}, self.key)
+        self.assertEqual(m["text"], "[富文本] 周报\n@Example 看 " + url)
+        span = m["mentions"][0]
+        self.assertEqual(m["text"][span["start"]:span["end"]], "@Example")
+
+    def test_without_a_link_the_spans_stay_on_larkagentxs_text(self):
+        data = self.rich((5, self.prop((1, "7001"), (2, "@Example"))), (1, self.prop((1, " 总结"))))
+        m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "@Example 总结", "content_data": data}, self.key)
+        self.assertEqual((m["text"], m["mentions"]), ("@Example 总结", [{"id": "7001", "start": 0, "end": 8, "label": "@Example"}]))
 
     def test_media(self):
         image = normalize({"msg_type_name": "IMAGE", "content_data": {"key": "k"}}, self.key)
