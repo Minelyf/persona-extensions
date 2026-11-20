@@ -94,6 +94,34 @@ class RealTest(unittest.TestCase):
         self.assertEqual(m["type"], "IMAGE")
         self.assertEqual(m["media"], [{"kind": "image", "key": "img_key"}])
 
+    def test_a_rich_text_self_mention_keeps_the_real_account_and_span(self):
+        rich = self.P.RichText()
+        rich.elementIds.extend(["1", "2", "3", "4", "5"])
+        rich.elements.dictionary["1"].tag = 1
+        rich.elements.dictionary["1"].property = self.P.TextProperty(content="请 ").SerializeToString()
+        rich.elements.dictionary["2"].tag = 1
+        rich.elements.dictionary["2"].property = self.P.TextProperty(content="@Example").SerializeToString()
+        rich.elements.dictionary["3"].tag = 1
+        rich.elements.dictionary["3"].property = self.P.TextProperty(content=" ").SerializeToString()
+        rich.elements.dictionary["4"].tag = 5
+        rich.elements.dictionary["4"].property = self.P.AtProperty(userId="7001", content="@Example").SerializeToString()
+        rich.elements.dictionary["5"].tag = 1
+        rich.elements.dictionary["5"].property = self.P.TextProperty(content=" 总结一下").SerializeToString()
+        content = self.P.TextContent(richText=rich)
+        m = self.normalized(self.frame([self.message("9005", 4, content.SerializeToString())]))[0]
+        self.assertEqual(m["text"], "请 @Example @Example 总结一下")
+        self.assertEqual(m["mentions"], [{"id": "7001", "start": 11, "end": 19, "label": "@Example"}])
+        self.assertEqual(m["text"][m["mentions"][0]["start"]:m["mentions"][0]["end"]], "@Example")
+
+    def test_an_at_without_a_target_does_not_invoke_an_account(self):
+        rich = self.P.RichText()
+        rich.elementIds.append("1")
+        rich.elements.dictionary["1"].tag = 5
+        rich.elements.dictionary["1"].property = self.P.AtProperty(content="@Example").SerializeToString()
+        content = self.P.TextContent(richText=rich)
+        m = self.normalized(self.frame([self.message("9006", 4, content.SerializeToString())]))[0]
+        self.assertEqual(m["mentions"], [])
+
     def test_credentials_go_through_the_hub_and_never_a_file(self):
         from larkx_persona.real import RealBackend
         saved = []

@@ -112,6 +112,8 @@ class Connector:
         # rstripped.
         suffix = (suffix or "").strip()[:AGENT_SUFFIX_MOST].strip()
         self.suffix = suffix if len(suffix) >= AGENT_SUFFIX_LEAST else AGENT_SUFFIX
+        # A fresh message from the signed-in user with a real AT element for that same account is also a request.
+        self.mention = True
         self.store = store
         self.hub = hub
         self._ready = threading.Event()
@@ -261,19 +263,27 @@ class Connector:
 
     # /agent: the channel (docs/extensions/channels.md "Contributing a channel" in Persona)
 
+    def _agent_request(self, m, me):
+        """The request in a user's own message, or None. A real self-mention and /agent share the answer-marker guard,
+        and channel.send uses this same rule as live receipt, so a request can always be answered."""
+        text = m.get("text") or ""
+        if text.rstrip().endswith(self.suffix):
+            return None
+        request = agent_request(text)
+        if request is not None:
+            return request
+        return mention_request(text, m.get("mentions"), me) if self.mention else None
+
     def _maybe_agent(self, m):
-        """Hands the user's own fresh "/agent …" to the hub, which puts it in the assistant's chat and answers through
-        channel.send. Someone else's /agent, an old one, and our own answers never count."""
+        """Hands the user's own fresh "/agent …" or self-mention to the hub, which puts it in the assistant's chat and
+        answers through channel.send. Someone else's request, an old one, and our own answers never count."""
         with self._lock:
             me = self._account_id
         if not me or m.get("sender") != me or m.get("type") not in AGENT_TYPES:
             return
         if time.time() - (m.get("at") or 0) > AGENT_FRESH_SECONDS:
             return
-        text = m.get("text") or ""
-        if text.rstrip().endswith(self.suffix):
-            return
-        request = agent_request(text)
+        request = self._agent_request(m, me)
         if request is None:
             return
         threading.Thread(target=self._hand_over, args=(m, request), daemon=True).start()
@@ -315,7 +325,7 @@ class Connector:
         with self._lock:
             signed_in, me = self._signed_in, self._account_id
         request = self.store.message(p.get("reply_to") or "") if p.get("reply_to") else None
-        if not signed_in or request is None or request["sender"] != me or agent_request(request["text"]) is None or request["text"].rstrip().endswith(self.suffix):
+        if not signed_in or request is None or request["sender"] != me or self._agent_request(request, me) is None:
             # Only an answer to one of the user's own /agent goes out: nothing in a chat they did not ask in.
             raise RpcError("没有可以回复的 /agent 消息", CANNOT_SEND)
         key = "channel:" + ref
@@ -800,6 +810,30 @@ def agent_request(text):
     if rest and not (rest[0].isspace() or rest[0] in ":："):
         return None
     return rest.lstrip(" \t\r\n:：").strip()
+
+
+def mention_request(text, mentions, me):
+    """The request with the signed-in user's real AT element removed, or None when that element is absent. The sender
+    is checked separately; spans, not a name match, decide what to remove. Other mentions remain part of the request."""
+    if not me or not isinstance(mentions, list):
+        return None
+    found = [m for m in mentions if isinstance(m, dict) and str(m.get("id") or "") == str(me)]
+    if not found:
+        return None
+    parts, cursor = [], 0
+    for m in sorted(found, key=lambda x: x.get("start", 0)):
+        start, end = m.get("start"), m.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or isinstance(start, bool) or isinstance(end, bool):
+            return None
+        if start < cursor or end <= start or end > len(text):
+            return None
+        label = m.get("label")
+        if not isinstance(label, str) or text[start:end] != label:
+            return None
+        parts.append(text[cursor:start])
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts).strip()
 
 
 def _kind_label(kind):

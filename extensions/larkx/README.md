@@ -12,3 +12,9 @@ Read this before installing:
 - [Installation](../../docs/installation.md)
 - [Development and tests](../../docs/development.md#add-a-python-extension)
 - [Manifest](persona-extension.json)
+
+## Invoke the assistant by mentioning yourself
+
+Write `/agent <what to do>`, or mention your own signed-in Feishu account with a real rich-text @ tag in your own message. The @ tag is removed from the request. A mention without any other text uses the same context-based request as an empty `/agent`.
+
+Only your own fresh live messages qualify: another person mentioning you does not invoke the assistant, and a reply ending with the configured AI-answer marker is ignored. Typing an `@name` as plain text is not a mention. Set **@自己唤起助手** (`agent_mention`, enabled by default) to `false` to allow only `/agent`. Answers to either kind of request appear under the original message with the configured AI-answer marker.
