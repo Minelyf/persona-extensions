@@ -19,8 +19,7 @@ import (
 // readings, then the exits compiled from every entry (internal/export, P6). The weekly pass picks the ledger's spot
 // check. Both run with the store's lock held and never on a dry run.
 
-//
-// It returns an error only when the hub held the model (model.ErrPaused) past a call's wait: the day's signals or
+// afterDaily returns an error only when the hub held the model (model.ErrPaused) past a call's wait: the day's signals or
 // exits wait for the next pass, which runs the day again (what was kept is not asked again).
 func (c *Curator) afterDaily(ctx context.Context, m model.Model, day string, run *store.Run, dry bool) error {
 	if dry {

@@ -137,16 +137,17 @@ func TestRoutePrimaryAnswers(t *testing.T) {
 
 // Every kind of failure of the primary hands over to the short or the long model by the call's size, and the reason
 // is counted from the hub's attempts.
+//
+// ReasonPaused: a candidate held on its connection while the next one, on another, answers: the hub handed over within
+// the call, and the answer stands (the hold is counted apart, not as a failure).
 func TestRouteFallsBackByLength(t *testing.T) {
 	for name, primary := range map[string]func() (wire.ModelCompleteResult, error){
-		ReasonError:       fails(wire.ModelErrorCodeModelFailed, "model.complete: 502 upstream"),
-		ReasonEmpty:       fails(wire.ModelErrorCodeModelFailed, "model.complete: the reply was empty"),
-		ReasonTimeout:     fails(wire.ModelErrorCodeTimeout, "model.complete: timed out"),
-		ReasonRefused:     fails(wire.ModelErrorCodeModelRefused, "model.complete: declined"),
-		ReasonFormat:      fails(wire.ModelErrorCodeInvalidOutput, "model.complete: the reply does not match json_schema"),
-		// A candidate held on its connection while the next one, on another, answers: the hub handed over within
-		// the call, and the answer stands (the hold is counted apart, not as a failure).
-		ReasonPaused: fails(wire.ModelErrorCodeModelPaused, "model.complete: paused"),
+		ReasonError:   fails(wire.ModelErrorCodeModelFailed, "model.complete: 502 upstream"),
+		ReasonEmpty:   fails(wire.ModelErrorCodeModelFailed, "model.complete: the reply was empty"),
+		ReasonTimeout: fails(wire.ModelErrorCodeTimeout, "model.complete: timed out"),
+		ReasonRefused: fails(wire.ModelErrorCodeModelRefused, "model.complete: declined"),
+		ReasonFormat:  fails(wire.ModelErrorCodeInvalidOutput, "model.complete: the reply does not match json_schema"),
+		ReasonPaused:  fails(wire.ModelErrorCodeModelPaused, "model.complete: paused"),
 	} {
 		for _, c := range []struct {
 			r    Request
