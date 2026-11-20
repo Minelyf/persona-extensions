@@ -640,6 +640,41 @@ class NormalizeTest(unittest.TestCase):
         m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "@Example 总结", "content_data": data}, self.key)
         self.assertEqual((m["text"], m["mentions"]), ("@Example 总结", [{"id": "7001", "start": 0, "end": 8, "label": "@Example"}]))
 
+    def text_of(self, data, content="原文"):
+        return normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": content, "content_data": data}, self.key)["text"]
+
+    def test_a_decoder_of_another_shape_keeps_larkagentxs_text(self):
+        # Review of #570: none of these may raise; each keeps the text LarkAgentX gave.
+        link = (6, self.prop((1, "https://example.com/e")))
+        for dictionary in (None, [], "x", 7):
+            self.assertEqual(self.text_of({"richText": {"elementIds": ["1"], "elements": {"dictionary": dictionary}}}), "原文")
+        for rich in (None, [], "x", {"elements": None}, {"elements": []}, {"elements": {"dictionary": {}}, "elementIds": "12"}):
+            m = normalize({"msg_type": 4, "msg_type_name": "TEXT", "content": "原文", "content_data": {"richText": rich}}, self.key)
+            self.assertEqual((m["text"], m["mentions"]), ("原文", []))
+        data = self.rich((1, self.prop((1, "看 "))), link)
+        data["richText"]["elementIds"] = [["1"], {"k": 1}, None, "1", "2"]  # unhashable and non-string ids
+        self.assertEqual(self.text_of(data), "看 https://example.com/e")
+        data = self.rich(link)
+        data["richText"]["elements"]["dictionary"]["3"] = None  # an element that is not a dictionary
+        data["richText"]["elements"]["dictionary"]["4"] = "x"
+        self.assertEqual(self.text_of(data), "https://example.com/e")
+        data = self.rich((1, "看"), link)  # a property decoded as a string instead of bytes
+        self.assertEqual(self.text_of(data), "https://example.com/e")
+        data = self.rich((6, "https://example.com/e"))
+        self.assertEqual(self.text_of(data), "原文")
+
+    def test_an_empty_element_after_a_link_keeps_it_apart_from_the_next_words(self):
+        data = self.rich((6, self.prop((1, "https://example.com"))), (6, self.prop((2, ""))), (1, self.prop((1, "next"))))
+        self.assertEqual(self.text_of(data), "https://example.com next")
+
+    def test_an_anchor_with_no_readable_address_keeps_larkagentxs_text(self):
+        # Review of #570: replace LarkAgentX's text only when a link was really added.
+        self.assertEqual(self.text_of(self.rich((1, self.prop((1, "看 "))), (6, self.prop((2, "只有标题")))), "看 "), "看 ")
+        anchored = {"richText": {"elementIds": [], "anchorIds": ["9"], "elements": {"dictionary": {}}}}
+        self.assertEqual(self.text_of(anchored, "看 "), "看 ")
+        unreadable = self.rich((1, self.prop((1, "看 "))), (6, b"\xff\xff"))
+        self.assertEqual(self.text_of(unreadable, "看 "), "看 ")
+
     def test_media(self):
         image = normalize({"msg_type_name": "IMAGE", "content_data": {"key": "k"}}, self.key)
         self.assertEqual(image["media"], [{"kind": "image", "key": "k"}])
