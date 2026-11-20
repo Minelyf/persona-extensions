@@ -115,8 +115,11 @@ func (c *Curator) RerunStatus() RerunProgress {
 	}
 	if mp := c.St.S.ModelPause; mp != nil {
 		what := "the model is unavailable"
-		if mp.What == "assistant" {
+		switch mp.What {
+		case "assistant":
 			what = "the assistant's computer is not connected"
+		case WhatHeld:
+			what = "the hub holds the model's connection (model_paused: busy or quota; waiting, not failing)"
 		}
 		p.Paused = fmt.Sprintf("%s (%s); %s is tried again at %s", what, mp.Reason, mp.Day, mp.NextTry)
 	}

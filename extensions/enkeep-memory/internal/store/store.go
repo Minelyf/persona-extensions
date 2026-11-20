@@ -356,6 +356,11 @@ type State struct {
 	// current prompt's marker (a unit lost to a model error, say). A day leaves the list once its daily run completes.
 	ForceReruns []string            `json:"force_reruns,omitempty"`
 	Admitted    map[string][]string `json:"admitted,omitempty"` // day → units a daily run (not dry) admitted: what coverage may expect a digest for
+	// SeenSessions: the agent sessions (S3) a completed pass found in the hub's list, by "<machine>/<session>"
+	// (0.2.0-beta.34). A runtime lists only its recent sessions, so a rerun or replay of an older day would not find
+	// them there; the hub still forwards a session's items to its runtime, so a day up to the session's Last is read
+	// from these as well. Any runtime's sessions, not one's in particular.
+	SeenSessions map[string]*SeenSession `json:"seen_sessions,omitempty"`
 
 	// v4: every facet's entries in one structure (internal/entry), and what feeds and uses them. The event log is
 	// not here: it is append-only in events.jsonl (AppendEvents).
@@ -388,8 +393,24 @@ type ModelPause struct {
 	Day     string `json:"day"`      // the day whose pass could not run
 	Fails   int    `json:"fails"`    // passes in a row that found the model unavailable
 	NextTry string `json:"next_try"` // RFC 3339: no pass needing the model starts before it
-	// What was away: "" the model, "assistant" the assistant's computer (its conversations could not be read).
+	// What was away: "" the model, "assistant" the assistant's computer (its conversations could not be read),
+	// "held" the hub held the model's connection (model_paused: busy or quota; not a failure).
 	What string `json:"what,omitempty"`
+}
+
+// SeenSession is what a pass knew of an agent session when the hub listed it: enough to name it and read its days
+// again once the list no longer has it.
+type SeenSession struct {
+	Title     string    `json:"title,omitempty"`
+	Agent     string    `json:"agent,omitempty"`
+	Project   string    `json:"project,omitempty"`
+	Started   time.Time `json:"started,omitempty"`
+	Updated   time.Time `json:"updated"`
+	Ended     string    `json:"ended,omitempty"`
+	ByPersona bool      `json:"by_persona,omitempty"`
+	// Last is the last local day the session was known to be active (its Updated's day when listed): a day after
+	// it has nothing of the session to read, unless the list has it again.
+	Last string `json:"last"`
 }
 
 // Backfill is the first-run replay of the user's history (4.1): the same daily and weekly passes over past days,

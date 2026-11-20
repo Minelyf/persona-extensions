@@ -10,11 +10,18 @@ import (
 
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/entry"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/hubapi"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 	"github.com/nwverse/persona/sdk/go/wire"
 )
 
 // agentEntries lists the agent sessions with activity on the day (S3): not the assistant's own (its words are S1,
 // through convsrc), never a health space one, not one started after the day.
+//
+// The hub's list is what the runtimes list, and a runtime may list only its recent sessions (enkeep: active in the
+// last 7 days, at most 80), so a rerun or replay of an older day would not find the sessions of that day there. The
+// sessions a pass found before are read too, up to the last day they were known to be active (State.SeenSessions,
+// 0.2.0-beta.34): the hub forwards their items to the runtime whether it lists them or not. A session no pass ever
+// listed is still not known.
 func (s *Source) agentEntries(ctx context.Context, since, end time.Time) []wire.KBEntry {
 	ss, err := s.Hub.Sessions(ctx, since)
 	s.note(entry.SrcAgent, KindAgents, err)
@@ -22,18 +29,52 @@ func (s *Source) agentEntries(ctx context.Context, since, end time.Time) []wire.
 		s.logf("agent sessions not read: %v", err)
 		return nil
 	}
+	day := since.In(s.Loc).Format("2006-01-02")
 	var out []wire.KBEntry
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	listed := map[string]bool{}
 	for _, se := range ss {
+		id := se.Machine + "/" + se.ID
+		listed[id] = true
 		if se.Health || se.Assistant || (!se.Started.IsZero() && !se.Started.Before(end)) {
 			continue
 		}
-		id := se.Machine + "/" + se.ID
 		s.sessions[id] = se
+		s.listed[id] = seenOf(se, s.Loc)
 		out = append(out, wire.KBEntry{Kind: KindAgents, ID: id, Name: sessionName(se, s.Machine), Updated: se.Updated, Source: "persona"})
 	}
+	ids := make([]string, 0, len(s.seen))
+	for id := range s.seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		k := s.seen[id]
+		if listed[id] || k.Last == "" || day > k.Last || (!k.Started.IsZero() && !k.Started.Before(end)) {
+			continue
+		}
+		machine, session, _ := strings.Cut(id, "/")
+		se := hubapi.Session{Machine: machine, ID: session, Title: k.Title, Agent: k.Agent, Project: k.Project, Started: k.Started,
+			Updated: k.Updated, Ended: k.Ended, ByPersona: k.ByPersona}
+		s.sessions[id] = se
+		updated := k.Updated
+		if updated.IsZero() {
+			updated = since
+		}
+		out = append(out, wire.KBEntry{Kind: KindAgents, ID: id, Name: sessionName(se, s.Machine), Updated: updated, Source: "persona"})
+	}
 	return out
+}
+
+// seenOf is what State.SeenSessions keeps of a listed session.
+func seenOf(se hubapi.Session, loc *time.Location) store.SeenSession {
+	last := ""
+	if !se.Updated.IsZero() {
+		last = se.Updated.In(loc).Format("2006-01-02")
+	}
+	return store.SeenSession{Title: se.Title, Agent: se.Agent, Project: se.Project, Started: se.Started, Updated: se.Updated,
+		Ended: se.Ended, ByPersona: se.ByPersona, Last: last}
 }
 
 // cursorKey is the State.Cursors key of an agent session.

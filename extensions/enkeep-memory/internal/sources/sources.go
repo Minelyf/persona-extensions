@@ -89,6 +89,8 @@ type Source struct {
 	status   map[string]*entry.SourceStatus
 	counted  map[string]bool // "<code>|<ref>@<day>": a unit counted once per pass
 	sessions map[string]hubapi.Session
+	seen     map[string]store.SeenSession // sessions known before this pass (State.SeenSessions, cursors, admitted units)
+	listed   map[string]store.SeenSession // sessions this pass found in the hub's list: kept at End
 	folds    map[string]*foldPage
 	cards    map[string][]hubapi.Interaction // day → the cards of the day
 	cardErr  map[string]error
@@ -120,6 +122,8 @@ func (s *Source) reset() {
 	s.pending = map[string]string{}
 	s.counted = map[string]bool{}
 	s.sessions = map[string]hubapi.Session{}
+	s.seen = map[string]store.SeenSession{}
+	s.listed = map[string]store.SeenSession{}
 	s.folds = map[string]*foldPage{}
 	s.cards = map[string][]hubapi.Interaction{}
 	s.cardErr = map[string]error{}
@@ -161,6 +165,40 @@ func (s *Source) Begin(st *store.State, day string) {
 		c.Units, c.Lines, c.Bytes = 0, 0, 0 // this pass's reading; End adds it to the totals
 		s.status[k] = &c
 	}
+	s.knownSessions(st)
+}
+
+// knownSessions is every agent session a pass found before (State.SeenSessions), with those read before that record
+// was kept: an agent cursor names a session and the last day read of it, an admitted unit a day it was read.
+func (s *Source) knownSessions(st *store.State) {
+	for id, v := range st.SeenSessions {
+		if v != nil {
+			s.seen[id] = *v
+		}
+	}
+	known := func(id, day string) {
+		if id == "" || !strings.Contains(id, "/") || day == "" {
+			return
+		}
+		k := s.seen[id]
+		if day > k.Last {
+			k.Last = day
+		}
+		s.seen[id] = k
+	}
+	for k, v := range st.Cursors {
+		if id, ok := strings.CutPrefix(k, entry.SrcAgent+"/"); ok {
+			_, day := cursorOf(v)
+			known(id, day)
+		}
+	}
+	for day, refs := range st.Admitted {
+		for _, ref := range refs {
+			if id, ok := strings.CutPrefix(ref, KindAgents+"/"); ok {
+				known(id, day)
+			}
+		}
+	}
 }
 
 // End writes the pass's reading into the state: the sources card (availability, why not, volumes added), the
@@ -196,6 +234,15 @@ func (s *Source) End(st *store.State, day string, units int) {
 		if later(v, st.Cursors[k]) {
 			st.Cursors[k] = v
 		}
+	}
+	if len(s.listed) > 0 && st.SeenSessions == nil {
+		st.SeenSessions = map[string]*store.SeenSession{}
+	}
+	for id, v := range s.listed {
+		if cur := st.SeenSessions[id]; cur != nil && cur.Last > v.Last {
+			v.Last = cur.Last
+		}
+		st.SeenSessions[id] = &v
 	}
 	if units > 0 && !slices.Contains(st.ActiveDays, day) {
 		st.ActiveDays = append(st.ActiveDays, day)
