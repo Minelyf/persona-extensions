@@ -361,6 +361,10 @@ type State struct {
 	// them there; the hub still forwards a session's items to its runtime, so a day up to the session's Last is read
 	// from these as well. Any runtime's sessions, not one's in particular.
 	SeenSessions map[string]*SeenSession `json:"seen_sessions,omitempty"`
+	// SessionHistory: the days whose agent sessions the hub's session history (nwverse/persona#11529) could not
+	// list in full, by day, as the day's last completed pass found it: an older hub without history, or a machine or
+	// source that did not answer or vouch for the whole window. A day listed in full has no entry.
+	SessionHistory map[string]*HistoryRead `json:"session_history,omitempty"`
 
 	// v4: every facet's entries in one structure (internal/entry), and what feeds and uses them. The event log is
 	// not here: it is append-only in events.jsonl (AppendEvents).
@@ -411,6 +415,28 @@ type SeenSession struct {
 	// Last is the last local day the session was known to be active (its Updated's day when listed): a day after
 	// it has nothing of the session to read, unless the list has it again.
 	Last string `json:"last"`
+	// First is the local day of the session's first item, when a pass read it from the start: a day before it has
+	// nothing of the session to read.
+	First string `json:"first,omitempty"`
+}
+
+// HistoryRead is how a day's pass could list the day's agent sessions from the hub's session history.
+type HistoryRead struct {
+	At      string `json:"at"`      // RFC 3339 of the pass
+	Offered bool   `json:"offered"` // false: the hub has no session history; the live list only was read
+	Why     string `json:"why,omitempty"`
+	// Gaps: the sources that did not list the window in full (machine, source, runtime, reason); their sessions are
+	// read as far as the live list and the sessions seen before have them.
+	Gaps []HistoryGap `json:"gaps,omitempty"`
+}
+
+// HistoryGap is a source of the hub's session history that did not list a window in full.
+type HistoryGap struct {
+	Machine string `json:"machine,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Honored bool   `json:"honored"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // Backfill is the first-run replay of the user's history (4.1): the same daily and weekly passes over past days,

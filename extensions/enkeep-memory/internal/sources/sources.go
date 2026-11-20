@@ -91,6 +91,10 @@ type Source struct {
 	sessions map[string]hubapi.Session
 	seen     map[string]store.SeenSession // sessions known before this pass (State.SeenSessions, cursors, admitted units)
 	listed   map[string]store.SeenSession // sessions this pass found in the hub's list: kept at End
+	first    map[string]string            // the day of a session's first item, read from the start this pass
+	fromHist map[string]bool              // sessions only the hub's session history listed this pass
+	hist     *store.HistoryRead           // how this pass could list the day's sessions from history (nil: not asked)
+	histAt   time.Time                    // the window's start history was asked for
 	folds    map[string]*foldPage
 	cards    map[string][]hubapi.Interaction // day → the cards of the day
 	cardErr  map[string]error
@@ -124,6 +128,9 @@ func (s *Source) reset() {
 	s.sessions = map[string]hubapi.Session{}
 	s.seen = map[string]store.SeenSession{}
 	s.listed = map[string]store.SeenSession{}
+	s.first = map[string]string{}
+	s.fromHist = map[string]bool{}
+	s.hist = nil
 	s.folds = map[string]*foldPage{}
 	s.cards = map[string][]hubapi.Interaction{}
 	s.cardErr = map[string]error{}
@@ -239,10 +246,35 @@ func (s *Source) End(st *store.State, day string, units int) {
 		st.SeenSessions = map[string]*store.SeenSession{}
 	}
 	for id, v := range s.listed {
-		if cur := st.SeenSessions[id]; cur != nil && cur.Last > v.Last {
-			v.Last = cur.Last
+		if cur := st.SeenSessions[id]; cur != nil {
+			v.Last, v.First = max(v.Last, cur.Last), cur.First
 		}
 		st.SeenSessions[id] = &v
+	}
+	for id, first := range s.first {
+		cur := st.SeenSessions[id]
+		if cur == nil {
+			if st.SeenSessions == nil {
+				st.SeenSessions = map[string]*store.SeenSession{}
+			}
+			k := s.seen[id] // known from a cursor or an admitted unit
+			cur = &k
+			st.SeenSessions[id] = cur
+		}
+		if cur.First == "" || first < cur.First {
+			cur.First = first
+		}
+	}
+	if s.hist != nil {
+		if s.hist.Offered && len(s.hist.Gaps) == 0 {
+			delete(st.SessionHistory, day) // listed in full
+		} else {
+			if st.SessionHistory == nil {
+				st.SessionHistory = map[string]*store.HistoryRead{}
+			}
+			h := *s.hist
+			st.SessionHistory[day] = &h
+		}
 	}
 	if units > 0 && !slices.Contains(st.ActiveDays, day) {
 		st.ActiveDays = append(st.ActiveDays, day)

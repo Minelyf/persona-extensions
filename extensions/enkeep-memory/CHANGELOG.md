@@ -8,6 +8,17 @@
   a day up to its last active day reads it too; sessions read before this version are known from their cursors and the
   units a day admitted. The hub forwards a session's items to its runtime whether it lists it or not. Any runtime's
   sessions, not one's in particular. A session no pass ever listed is still not known.
+- **The hub's session history is read** (nwverse/persona#11529: `GET /api/v1/sessions?include_inactive=1&since=…`):
+  every pass also lists the sessions active from the day's start on, archived, finished and offline ones too, every
+  page, and reads them with the live list's and the ones seen before, each once. Scheduled runs (`origin`
+  `automation`, or no message of the user's) are left out; sessions that do not say (the node's own Claude Code and
+  Codex sessions) are read, their speakers told apart as before. A source that did not list the window in full (not
+  honored: unsupported, failed, node_unsupported, offline; or not complete) is recorded for the day and named by
+  `enkeep_rerun_status` (day, machine, source, reason); its sessions are read as far as the live list and the seen
+  ones have them, and a later pass of the day (a rerun) fills them in. A hub without session history (no `history` in
+  its answer, or the query turned down) is read as before, and the status says so. A history row whose items the
+  hub no longer lets the extension read (it keeps that for a day, in memory) is listed again and read once more.
+  A session read from its start is not asked for on days before its first item.
 - **A rerun of a day adds to what it admitted.** Before, it replaced the day's list of admitted units, so the units an
   earlier run read and the rerun no longer saw were dropped from it. Forgetting a source takes its units off every day.
 - **A hold of the hub (`model_paused`) is a wait, not a failure.** The call waits until the hold lets go (the hub's

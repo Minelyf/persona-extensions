@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -15,13 +16,18 @@ import (
 )
 
 // agentEntries lists the agent sessions with activity on the day (S3): not the assistant's own (its words are S1,
-// through convsrc), never a health space one, not one started after the day.
+// through convsrc), never a health space one, not one started after the day, nor before its first item.
 //
-// The hub's list is what the runtimes list, and a runtime may list only its recent sessions (enkeep: active in the
-// last 7 days, at most 80), so a rerun or replay of an older day would not find the sessions of that day there. The
-// sessions a pass found before are read too, up to the last day they were known to be active (State.SeenSessions,
-// 0.2.0-beta.34): the hub forwards their items to the runtime whether it lists them or not. A session no pass ever
-// listed is still not known.
+// Three lists, together and each session once (by machine and session id). The hub's live list is what the runtimes
+// list, which may be only their recent sessions (enkeep: active in the last 7 days, at most 80). The hub's session
+// history (nwverse/persona#11529, 0.2.0-beta.34) has the sessions active from the day's start on, archived, finished
+// and offline ones too; scheduled runs are left out. A hub without it, or a source that did not list the window in
+// full, is recorded (State.SessionHistory, shown by enkeep_rerun_status), and those sessions are read as far as the
+// other two lists have them. The sessions a pass found before are read up to the last day they were known to be
+// active (State.SeenSessions): the hub forwards their items to the runtime whether it lists them or not.
+//
+// Every pass asks the history, the daily one too (decided as recommended): a session that started and was archived
+// within the day is in no live list by the next morning, and one request a day costs little.
 func (s *Source) agentEntries(ctx context.Context, since, end time.Time) []wire.KBEntry {
 	ss, err := s.Hub.Sessions(ctx, since)
 	s.note(entry.SrcAgent, KindAgents, err)
@@ -29,20 +35,37 @@ func (s *Source) agentEntries(ctx context.Context, since, end time.Time) []wire.
 		s.logf("agent sessions not read: %v", err)
 		return nil
 	}
+	hist := s.history(ctx, since)
 	day := since.In(s.Loc).Format("2006-01-02")
 	var out []wire.KBEntry
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	listed := map[string]bool{}
-	for _, se := range ss {
-		id := se.Machine + "/" + se.ID
-		listed[id] = true
-		if se.Health || se.Assistant || (!se.Started.IsZero() && !se.Started.Before(end)) {
-			continue
+	add := func(id string, se hubapi.Session, updated time.Time) {
+		if f := s.seen[id].First; f != "" && day < f {
+			return // nothing of it before its first item
 		}
 		s.sessions[id] = se
-		s.listed[id] = seenOf(se, s.Loc)
-		out = append(out, wire.KBEntry{Kind: KindAgents, ID: id, Name: sessionName(se, s.Machine), Updated: se.Updated, Source: "persona"})
+		out = append(out, wire.KBEntry{Kind: KindAgents, ID: id, Name: sessionName(se, s.Machine), Updated: updated, Source: "persona"})
+	}
+	for _, list := range [][]hubapi.Session{ss, hist} {
+		for _, se := range list {
+			id := se.Machine + "/" + se.ID
+			if listed[id] {
+				continue
+			}
+			listed[id] = true
+			if se.Health || se.Assistant || (!se.Started.IsZero() && !se.Started.Before(end)) {
+				continue
+			}
+			s.listed[id] = seenOf(se, s.Loc)
+			add(id, se, se.Updated)
+		}
+	}
+	for _, se := range hist {
+		if id := se.Machine + "/" + se.ID; !slices.ContainsFunc(ss, func(x hubapi.Session) bool { return x.Machine+"/"+x.ID == id }) {
+			s.fromHist[id] = true // its items are readable for a day after the history listed it (persona#11529)
+		}
 	}
 	ids := make([]string, 0, len(s.seen))
 	for id := range s.seen {
@@ -57,14 +80,61 @@ func (s *Source) agentEntries(ctx context.Context, since, end time.Time) []wire.
 		machine, session, _ := strings.Cut(id, "/")
 		se := hubapi.Session{Machine: machine, ID: session, Title: k.Title, Agent: k.Agent, Project: k.Project, Started: k.Started,
 			Updated: k.Updated, Ended: k.Ended, ByPersona: k.ByPersona}
-		s.sessions[id] = se
 		updated := k.Updated
 		if updated.IsZero() {
 			updated = since
 		}
-		out = append(out, wire.KBEntry{Kind: KindAgents, ID: id, Name: sessionName(se, s.Machine), Updated: updated, Source: "persona"})
+		add(id, se, updated)
 	}
 	return out
+}
+
+// history is the hub's session history from since to now (nil when the hub has none or it failed), with how fully
+// it was listed kept for End.
+func (s *Source) history(ctx context.Context, since time.Time) []hubapi.Session {
+	hh, ok := s.Hub.(hubapi.HistoryHub)
+	read := &store.HistoryRead{At: time.Now().UTC().Format(time.RFC3339)}
+	var out []hubapi.Session
+	switch {
+	case !ok:
+		read.Why = "this hub client has no session history"
+	default:
+		h, err := hh.History(ctx, since, time.Time{})
+		switch {
+		case err != nil:
+			read.Why = "session history not read: " + err.Error()
+			s.logf("agent session history not read: %v", err)
+		case !h.Offered:
+			read.Why = h.Why
+		default:
+			read.Offered = true
+			for _, g := range h.Gaps {
+				read.Gaps = append(read.Gaps, store.HistoryGap(g))
+			}
+			if !h.Complete && len(read.Gaps) == 0 { // the hub said incomplete without naming a source
+				read.Gaps = append(read.Gaps, store.HistoryGap{Honored: true, Reason: "incomplete"})
+			}
+			out = h.Sessions
+		}
+	}
+	s.mu.Lock()
+	s.hist, s.histAt = read, since
+	s.mu.Unlock()
+	return out
+}
+
+// relist asks the history again, for a session it listed whose items the hub no longer lets the extension read (the
+// hub keeps that for a day, in memory: a restart forgets it). It says whether it was asked.
+func (s *Source) relist(ctx context.Context, id string) bool {
+	s.mu.Lock()
+	again, since := s.fromHist[id], s.histAt
+	s.mu.Unlock()
+	hh, ok := s.Hub.(hubapi.HistoryHub)
+	if !again || !ok {
+		return false
+	}
+	_, err := hh.History(ctx, since, time.Time{})
+	return err == nil
 }
 
 // seenOf is what State.SeenSessions keeps of a listed session.
@@ -96,6 +166,9 @@ func (s *Source) folded(ctx context.Context, machine, session, day string) (*fol
 		return page, nil
 	}
 	items, err := s.Hub.Items(ctx, machine, session, hubapi.ItemsQuery{Fold: true, After: after})
+	if err != nil && s.relist(ctx, id) { // a history row the hub forgot it gave: list it again, read once more
+		items, err = s.Hub.Items(ctx, machine, session, hubapi.ItemsQuery{Fold: true, After: after})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +202,19 @@ func (s *Source) agentDay(ctx context.Context, id, day string) ([]string, error)
 	if err != nil {
 		s.note(entry.SrcAgent, KindAgents, err)
 		return nil, nil // a session that cannot be read now is left out, not the day
+	}
+	if page.base == 0 { // read from the start: its first item dates the session (State.SeenSessions' First)
+		first := ""
+		for _, it := range page.items {
+			if d := it.At.In(s.Loc).Format("2006-01-02"); !it.At.IsZero() && (first == "" || d < first) {
+				first = d
+			}
+		}
+		if first != "" {
+			s.mu.Lock()
+			s.first[id] = first
+			s.mu.Unlock()
+		}
 	}
 	type line struct {
 		at   time.Time

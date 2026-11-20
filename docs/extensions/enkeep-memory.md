@@ -77,7 +77,9 @@ reused and only the rest calls the model. A unit the model cannot read keeps its
 from where it stopped, as when the model is away. When the hub holds the model's connection (busy or out of quota) a
 call waits for the hold and asks again; a unit still held goes back to the queue, its day stays open, and nothing is
 counted as failed. A rerun also reads the agent sessions earlier passes found, though their runtime no longer lists
-them, and adds to what the day admitted rather than replace it.
+them, and adds to what the day admitted rather than replace it. On a hub with session history, every pass also lists
+the day's archived, finished and offline sessions (scheduled runs left out); `enkeep_rerun_status` names the days,
+machines and sources the history could not list in full, or says the hub has none.
 
 ## Development
 
