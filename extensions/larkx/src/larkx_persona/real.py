@@ -48,13 +48,104 @@ def normalize(msg, extract_key):
     if at > 1e12:
         at /= 1000
     root = msg.get("root_id") or ""
+    text = msg.get("content") or ""
     return {
         "id": str(msg.get("msg_id") or ""), "chat": str(msg.get("chat_id") or ""),
         "chat_kind": "dm" if msg.get("chat_type") == 1 else "group",
         "position": int(msg.get("position") or 0), "sender": str(msg.get("from_id") or ""), "type": name,
-        "text": msg.get("content") or "", "at": at or time.time(), "root": "" if root == "0" else root,
+        "text": text, "at": at or time.time(), "root": "" if root == "0" else root,
         "parent": msg.get("parent_id") or "", "at_me": bool(msg.get("at_me")), "media": media,
+        "mentions": _mentions(data, text),
     }
+
+
+def _mentions(data, text):
+    """The AT elements' account ids and exact spans in the flattened text. Only this metadata identifies a real mention:
+    an @-looking word, or at_me on somebody else's message, does not. Decoding the two known string fields here keeps
+    LarkAgentX out of the connector's fast import path."""
+    if not isinstance(data, dict):
+        return []
+    rich = data.get("richText") or {}
+    elements = (rich.get("elements") or {}).get("dictionary") or {}
+    if not isinstance(elements, dict):
+        return []
+    ids = rich.get("elementIds") or []
+    keys = [k for k in ids if k in elements]
+    keys += [k for k in elements if k not in set(ids)]
+    if not ids:
+        try:
+            keys = sorted(elements, key=lambda k: int(k))
+        except (TypeError, ValueError):
+            keys = list(elements)
+    mentions, rebuilt = [], ""
+    for key in keys:
+        element = elements[key]
+        if not isinstance(element, dict):
+            return []
+        tag, prop = element.get("tag", 1), element.get("property")
+        if not prop:
+            continue
+        if tag in (1, 3, 7, 8, 9, 17):
+            content = _text_property(prop)
+            if content is not None:
+                rebuilt += content + ("\n" if tag == 3 else "")
+                continue
+        if tag == 5:
+            user_id, content = _at_property(prop)
+            if user_id:
+                start = len(rebuilt)
+                rebuilt += content or "[@]"
+                mentions.append({"id": user_id, "start": start, "end": len(rebuilt), "label": rebuilt[start:]})
+                continue
+        # The placeholders are the same as LarkAgentX's extract_rich_text. Rebuilding every element, not searching
+        # for an @name in the body, distinguishes a real AT from identical ordinary text before it.
+        rebuilt += {2: "[图片]", 5: "[@]", 10: "[表情]", 18: "[视频]", 22: "[文档]"}.get(tag, "")
+    # If another decoder version flattened the text differently, keep the message inert rather than guess a span.
+    return mentions if rebuilt == text else []
+
+
+def _at_property(data):
+    """AtProperty { string userId = 1; string content = 2; }, without importing generated protobuf code."""
+    return _string_property(data, 1), _string_property(data, 2)
+
+
+def _text_property(data):
+    """TextProperty.content, or None when the property is not the expected wire-format string."""
+    return _string_property(data, 1)
+
+
+def _string_property(data, wanted):
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    data, i = bytes(data), 0
+    while i < len(data):
+        key, i = _wire_varint(data, i)
+        if key is None:
+            return None
+        size, i = _wire_varint(data, i)
+        if size is None or size < 0 or i + size > len(data):
+            return None
+        if key >> 3 != wanted:
+            i += size
+            continue
+        try:
+            return data[i:i + size].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return None
+
+
+def _wire_varint(data, i):
+    value = 0
+    for shift in range(0, 70, 7):
+        if i >= len(data):
+            return None, i
+        b = data[i]
+        i += 1
+        value |= (b & 127) << shift
+        if b < 128:
+            return value, i
+    return None, i
 
 
 def fetch_upstream(lock, data_dir, urlopen=urllib.request.urlopen):
