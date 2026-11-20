@@ -141,8 +141,8 @@ func TestHeldPastTheBudget(t *testing.T) {
 	rt.Now = c.now
 	f := &fakeHub{answers: answers{"flash": held(c, "busy", 4*time.Minute), "small": held(c, "busy", 4*time.Minute)}}
 	_, err := Hub{Route: rt, call: f.call, now: c.now, sleep: c.sleep}.Complete(context.Background(), shortReq)
-	p, ok := Held(err)
-	if !ok || !errors.Is(err, ErrPaused) || !errors.Is(err, ErrUnavailable) {
+	p, isHeld := Held(err)
+	if !isHeld || !errors.Is(err, ErrPaused) || !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err %v", err)
 	}
 	if len(c.waits) != 2 || !p.Until.Equal(c.t.Add(4*time.Minute)) {
