@@ -84,6 +84,9 @@ class Backend:
     def create_chat(self, user):
         return "c_" + user
 
+    def own_chat(self):
+        return "c_me"
+
     def search(self, query):
         return []
 
