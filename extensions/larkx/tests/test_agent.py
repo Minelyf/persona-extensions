@@ -152,6 +152,62 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(self.backend.sent, [])
 
 
+class AgentTopicTest(unittest.TestCase):
+    """A group request carries its topic as the channel message's thread: the hub gives each topic a conversation of its
+    own. The key is the topic the answer goes into: the request's root, or the request itself when it opens the topic."""
+    setUp, handed, nothing_handed = AgentTest.setUp, AgentTest.handed, AgentTest.nothing_handed
+
+    def test_a_request_outside_a_topic_opens_one(self):
+        self.c._on_live(message("m1", "g1", 1, kind="group", sender=ME, text="/agent 新问题"))
+        self.assertEqual(self.handed()["message"]["thread"], "g1:m1")
+        self.c.channel_send({"ref": "r1", "text": "好", "kind": "answer", "reply_to": "m1"})
+        self.assertEqual(self.backend.sent[0][2], "m1")
+
+    def test_a_request_in_a_topic_continues_it(self):
+        self.c._on_live(message("m2", "g1", 2, kind="group", sender=ME, text="/agent 接着说", root="m1"))
+        self.assertEqual(self.handed()["message"]["thread"], "g1:m1")
+        self.c.channel_send({"ref": "r1", "text": "好", "kind": "answer", "reply_to": "m2"})
+        self.assertEqual(self.backend.sent[0][2], "m1")
+
+    def test_a_self_mention_in_a_topic_counts_the_same(self):
+        m = message("m3", "g1", 3, kind="group", sender=ME, text="@Example 再看看", root="m1")
+        m["mentions"] = [{"id": ME, "start": 0, "end": 8, "label": "@Example"}]
+        self.c._on_live(m)
+        got = self.handed()["message"]
+        self.assertEqual((got["text"], got["thread"]), ("再看看", "g1:m1"))
+
+    def test_a_direct_chat_has_no_thread(self):
+        self.c._on_live(message("m1", "c_me", 1, sender=ME, text="/agent 私聊", root="m0"))
+        self.assertNotIn("thread", self.handed()["message"])
+
+    def test_the_setting_off_sends_no_thread(self):
+        self.c.topics = False
+        self.c._on_live(message("m1", "g1", 1, kind="group", sender=ME, text="/agent 新问题"))
+        self.assertNotIn("thread", self.handed()["message"])
+
+    def test_initialize_and_the_manifest(self):
+        got = {}
+
+        class Recorder:
+            def __init__(self, *args, **kwargs):
+                got["connector"] = self
+
+            def start(self):
+                pass
+
+        real = main.Connector
+        main.Connector = Recorder
+        self.addCleanup(setattr, main, "Connector", real)
+        for config, want in (({}, True), ({"agent_group_topics": False}, False), ({"agent_group_topics": True}, True)):
+            plugin = Plugin({"id": "larkx", "version": "0", "contributes": {}}, lambda *_: None)
+            plugin.initialize({"protocol": main.PROTOCOL, "extension": {"data_dir": self.dir.name}, "config": config})
+            self.assertIs(got["connector"].topics, want, config)
+        with open(os.path.join(main.ROOT, "persona-extension.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertIs(manifest["configuration"]["properties"]["agent_group_topics"]["default"], True)
+        self.assertIs(manifest["contributes"]["channel"][0]["capabilities"]["threads"], True)
+
+
 class AgentPushTest(unittest.TestCase):
     """A push (kind push, no reply_to: a background task's report, a main-chat turn, a reminder) may carry anything the
     assistant knows, so it goes only to the user's own chat with themself, marked like an answer."""

@@ -131,6 +131,9 @@ class Connector:
         self.suffix = suffix if len(suffix) >= AGENT_SUFFIX_LEAST else AGENT_SUFFIX
         # A fresh message from the signed-in user with a real AT element for that same account is also a request.
         self.mention = True
+        # A group request carries its topic as the channel message's thread: the hub keeps one conversation per topic
+        # (setting agent_group_topics).
+        self.topics = True
         self.store = store
         self.hub = hub
         self._ready = threading.Event()
@@ -371,6 +374,9 @@ class Connector:
 
     def _hand_over(self, m, request):
         message = {"id": m["id"], "text": request or AGENT_EMPTY}
+        thread = self._thread(m)
+        if thread:
+            message["thread"] = thread
         context = self._agent_context(m)
         if context:
             message["forward"] = context
@@ -387,6 +393,13 @@ class Connector:
                     self._log("handing /agent to the hub failed: %s" % type(e).__name__)
                     return
                 time.sleep(wait)
+
+    def _thread(self, m):
+        """The topic a group request belongs to, "" for a direct chat: the topic it was written in, or the one its answer
+        opens under it (channel_send replies under the same root). The hub gives each one a conversation of its own."""
+        if not self.topics or (m.get("chat_kind") or "group") != "group":
+            return ""
+        return "%s:%s" % (m["chat"], m.get("root") or m["id"])
 
     def _agent_context(self, m):
         """Where the request was written and what was said there just before it, for the assistant."""
