@@ -19,10 +19,36 @@ import (
 
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/curate"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/entry"
+	exits "github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/export"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/model"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/recall"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 	"github.com/nwverse/persona/sdk/go/ext"
 )
+
+// toolWait is how long a tool that changes the state waits for the store's lock before it says a pass is running
+// (or, enkeep_mark_wrong, queues its marks): the hub gives up on a tool call after a while, a daily pass holds the
+// lock for tens of minutes.
+var toolWait = 5 * time.Second // a variable for tests
+
+// busy turns curate.ErrBusy into what the caller is told: which pass runs, and to call again when it is over.
+func (a *app) busy(err error) error {
+	if !errors.Is(err, curate.ErrBusy) {
+		return err
+	}
+	what := "a curation pass"
+	if r := a.runningNow(); r != "" {
+		what = r
+	}
+	return fmt.Errorf("busy: %s is running and holds the state; call again when it is over (enkeep_rerun_status shows it)", what)
+}
+
+// runningNow is the pass this process runs, "" when none.
+func (a *app) runningNow() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.running
+}
 
 // connectorID is the manifest's connector id. The hub keeps only the tools whose names start with it and "_"
 // (connector.owned), so the tools are enkeep_*.
@@ -73,6 +99,33 @@ var rerunTools = []tool{
 				"description": "only these facets: interaction (working with the AI), tools, judgement (default judgements), workflow (ways of working), world (projects and facts), people, persona (about the user)"},
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 30, "default": 12},
 		}}},
+	{Name: "enkeep_seed_import", Description: "Import the user's own profile and rules confirmed elsewhere (another " +
+		"memory, a notes file, a profile platform) into enkeep memory as seeds, in the general format: a source name and " +
+		"items {id, kind (rule | guardrail | preference | fact), text, confirmed (YYYY-MM-DD), and optionally facet, hard, " +
+		"category, scope (global | project:<name>), domain (work | life), effective, expiring (recent | role), sensitive}. " +
+		"Previews by default: says how many items would be new, merged with an entry the curator has, updated, the same " +
+		"as before, or skipped and why, writing nothing; apply: true writes. Items in the four sensitive categories " +
+		"(emotion, finance, health, family; by category, keywords and a model's reading), with a credential, or not " +
+		"confirmed at the source are never imported. New seeds start as candidates and reach the exits only once the " +
+		"user's own records bear them out.",
+		InputSchema: map[string]any{"type": "object", "required": []string{"source", "items"}, "properties": map[string]any{
+			"source": map[string]any{"type": "string", "description": "a short name of the source, without spaces or slashes (e.g. enkeep)"},
+			"items": map[string]any{"type": "array", "description": "at most 500 items", "items": map[string]any{"type": "object",
+				"required": []string{"id", "kind", "text", "confirmed"}, "properties": map[string]any{
+					"id": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"rule", "guardrail", "preference", "fact"}},
+					"text": map[string]any{"type": "string"}, "confirmed": map[string]any{"type": "string"},
+					"facet": map[string]any{"type": "string", "enum": []string{"interaction", "tools", "judgement", "workflow", "world", "persona"}},
+					"hard":  map[string]any{"type": "boolean"}, "category": map[string]any{"type": "string"},
+					"scope": map[string]any{"type": "string"}, "domain": map[string]any{"type": "string", "enum": []string{"work", "life"}},
+					"effective": map[string]any{"type": "string"}, "expiring": map[string]any{"type": "string", "enum": []string{"", "recent", "role"}},
+					"sensitive": map[string]any{"type": "string"},
+				}}},
+			"apply": map[string]any{"type": "boolean", "default": false, "description": "false (default): preview only; true: write"},
+		}}},
+	{Name: "enkeep_seed_status", Description: "Show enkeep memory's seeds: whether seeds are on as a source, the seed " +
+		"entries by source and status (a candidate waits for the user's own records to bear it out), by facet, how many " +
+		"reach the exits now, the curator's own entries a seed confirmed, and every import written.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
 	{Name: "enkeep_mark_wrong", Description: "Mark enkeep memory entries wrong, for example a line in the assistant's " +
 		"「关于用户（由 enkeep-memory 整理）」 block that is not the user's rule (a task prompt, a relay or a test prompt " +
 		"taken for the user's words). No card goes to the user's phone: the entries leave every exit at once and stay as " +
@@ -131,6 +184,32 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		return a.recallTool(raw)
 	case "enkeep_mark_wrong":
 		return a.markWrongTool(ctx, raw)
+	case "enkeep_seed_import":
+		var in struct {
+			Source string            `json:"source"`
+			Items  []curate.SeedItem `json:"items"`
+			Apply  bool              `json:"apply"`
+		}
+		if err := strictDecode(raw, &in); err != nil {
+			return "", err
+		}
+		f := curate.SeedFormat{Source: in.Source, Items: in.Items}
+		if err := curate.CheckSeeds(&f); err != nil {
+			return "", err
+		}
+		if in.Apply && !entry.On(a.seedSwitches(), entry.K21Seeds) {
+			return "", errors.New("seeds are switched off as a source (K21 on the enkeep memory page): nothing imported")
+		}
+		r, err := a.c.ImportSeeds(ctx, f, in.Apply, toolWait)
+		if err != nil {
+			return "", a.busy(err)
+		}
+		return r.Text(), nil
+	case "enkeep_seed_status":
+		if err := strictDecode(raw, &struct{}{}); err != nil {
+			return "", err
+		}
+		return a.c.Seeds(exits.Usable).Text(), nil
 	case "enkeep_rerun":
 		var in struct {
 			From, To string
@@ -139,9 +218,9 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if err := strictDecode(raw, &in); err != nil {
 			return "", err
 		}
-		r, err := a.c.QueueRerun(strings.TrimSpace(in.From), strings.TrimSpace(in.To), a.localDay(), in.Force)
+		r, err := a.c.QueueRerunWithin(strings.TrimSpace(in.From), strings.TrimSpace(in.To), a.localDay(), in.Force, toolWait)
 		if err != nil {
-			return "", err
+			return "", a.busy(err)
 		}
 		var b strings.Builder
 		if r.Force {
@@ -166,20 +245,28 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if err := strictDecode(raw, &struct{}{}); err != nil {
 			return "", err
 		}
-		p := a.c.RerunStatus()
+		p := a.c.RerunStatus() // the pages' snapshot: never waits for a run's lock
 		var b strings.Builder
 		fmt.Fprintf(&b, "Prompt %s: %d day(s) done, %d waiting.", p.Prompt, len(p.Done), len(p.Waiting))
+		fmt.Fprintf(&b, " Rerun progress: %d day(s) done, %d left, %d new usable entr(ies) resting on the days read since the batch was queued.",
+			len(p.Done), len(p.Waiting)+len(p.Forced), p.Gain)
 		if len(p.Waiting) > 0 {
 			fmt.Fprintf(&b, " Waiting: %s.", span(p.Waiting))
 		}
 		if len(p.Forced) > 0 {
 			fmt.Fprintf(&b, " Queued with force (read again although already read with this prompt), waiting: %s.", span(p.Forced))
 		}
-		a.mu.Lock()
-		running := a.running
-		a.mu.Unlock()
-		if running != "" {
+		if pr := p.Running; pr != nil {
+			fmt.Fprintf(&b, " Running now: %s %s", pr.Kind, pr.Period)
+			if pr.Stage != "" {
+				fmt.Fprintf(&b, ", %s %d/%d", pr.Stage, pr.Done, pr.Total)
+			}
+			fmt.Fprintf(&b, ", since %s.", pr.Started.UTC().Format(time.RFC3339))
+		} else if running := a.runningNow(); running != "" {
 			fmt.Fprintf(&b, " Running now: %s.", running)
+		}
+		if !p.At.IsZero() {
+			fmt.Fprintf(&b, " (State as of %s.)", p.At.UTC().Format(time.RFC3339))
 		}
 		if p.Paused != "" {
 			fmt.Fprintf(&b, " Paused: %s.", p.Paused)
@@ -200,13 +287,20 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 			return "", err
 		}
 		apply := in.DryRun != nil && !*in.DryRun
-		r, err := a.c.Resettle(a.localDay(), apply)
+		r, err := a.c.ResettleWithin(a.localDay(), apply, toolWait)
 		if err != nil {
-			return "", err
+			return "", a.busy(err)
 		}
 		return resettleText(r), nil
 	}
 	return "", errors.New("unknown tool " + name)
+}
+
+// seedSwitches are the switches as the pages' snapshot has them.
+func (a *app) seedSwitches() map[string]entry.SwitchSetting {
+	st, _, done := a.c.Read()
+	defer done()
+	return st.Switches
 }
 
 // modelText says the model route and what it counted (docs/model-routes.md).
@@ -222,8 +316,20 @@ func (a *app) modelText() string {
 	}
 	fmt.Fprintf(&b, "Model route: %s; fallback above %d estimated tokens %s, else %s.", primary, rt.LongAbove, rt.Long, rt.Short)
 	if rt.Stats != nil {
-		b.WriteString("\n" + rt.Stats.Snapshot().Summary())
+		snap := rt.Stats.Snapshot()
+		b.WriteString("\n" + snap.Summary())
+		today := a.localDay()
+		yesterday := today
+		if t, err := time.Parse("2006-01-02", today); err == nil {
+			yesterday = t.AddDate(0, 0, -1).Format("2006-01-02")
+		}
+		lines := snap.CostLines(today)
+		b.WriteString("\n" + strings.Join(lines, "\n"))
+		b.WriteString("\n" + snap.CostLines(yesterday)[0])
 	}
+	out, waiting, minute := model.Shared().Stats()
+	fmt.Fprintf(&b, "\nCall limit: at most %d at once and %d a minute (reruns wait behind the daily and weekly passes); now %d out, %d waiting, %d in the last minute.",
+		model.LimitConcurrent, model.LimitPerMinute, out, waiting, minute)
 	return b.String()
 }
 
@@ -316,31 +422,18 @@ func (a *app) recallTool(raw json.RawMessage) (string, error) {
 		}
 		q.Facets = append(q.Facets, x)
 	}
-	a.c.St.Lock()
-	defer a.c.St.Unlock()
-	st := a.c.St.S
+	st, _, done := a.c.Read() // the snapshot: a run holds the store's lock for its whole pass
 	res := recall.Search(st, q)
-	day := a.localDay()
-	if st.Recall == nil {
-		st.Recall = map[string]*store.RecallDay{}
+	done()
+	var facets, statuses []string
+	for _, h := range res.Hits {
+		facets = append(facets, string(h.Facet))
+		statuses = append(statuses, string(h.Status))
 	}
-	d := st.Recall[day]
-	if d == nil {
-		d = &store.RecallDay{Facets: map[string]int{}, Statuses: map[string]int{}}
-		st.Recall[day] = d
-		days := make([]string, 0, len(st.Recall))
-		for k := range st.Recall {
-			days = append(days, k)
-		}
-		sort.Strings(days)
-		for len(days) > store.RecallDays {
-			delete(st.Recall, days[0])
-			days = days[1:]
-		}
+	if err := a.recallLog().Count(a.localDay(), facets, statuses); err != nil {
+		a.logf("enkeep-memory: recall counts: %v", err)
 	}
-	d.Calls++
 	if len(res.Hits) == 0 {
-		d.Empty++
 		if res.Pool == 0 {
 			return "enkeep memory has no curated entries to look in yet.", nil
 		}
@@ -349,39 +442,30 @@ func (a *app) recallTool(raw json.RawMessage) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d line(s) from enkeep memory, best match first (稳定 = settled; 候选/较早 = less certain):\n", len(res.Hits))
 	for _, h := range res.Hits {
-		if d.Facets == nil {
-			d.Facets = map[string]int{}
-		}
-		if d.Statuses == nil {
-			d.Statuses = map[string]int{}
-		}
-		d.Facets[string(h.Facet)]++
-		d.Statuses[string(h.Status)]++
 		b.WriteString(recall.Format(h))
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
 }
 
+// recallLog is the counts' file beside the state (store.RecallLog), opened on first use when init did not.
+func (a *app) recallLog() *store.RecallLog {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.recalls == nil {
+		a.recalls = store.OpenRecall(a.c.St.Dir, nil)
+	}
+	return a.recalls
+}
+
 // recallCounts says enkeep_recall's counts of the last 7 days, for enkeep_rerun_status: "" when it was never called.
 func (a *app) recallCounts() string {
-	a.c.St.Lock()
-	defer a.c.St.Unlock()
-	rs := a.c.St.S.Recall
-	if len(rs) == 0 {
+	keys, days := a.recallLog().Days(7)
+	if len(keys) == 0 {
 		return ""
 	}
-	days := make([]string, 0, len(rs))
-	for k := range rs {
-		days = append(days, k)
-	}
-	sort.Strings(days)
-	if len(days) > 7 {
-		days = days[len(days)-7:]
-	}
-	var parts []string
-	for _, k := range days {
-		d := rs[k]
-		parts = append(parts, fmt.Sprintf("%s %d call(s), %d empty", k, d.Calls, d.Empty))
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%s %d call(s), %d empty", k, days[i].Calls, days[i].Empty)
 	}
 	return "enkeep_recall: " + strings.Join(parts, "; ") + "."
 }
@@ -403,11 +487,15 @@ func (a *app) markWrongTool(ctx context.Context, raw json.RawMessage) (string, e
 	if in.Reason == "" || len([]rune(in.Reason)) > 300 {
 		return "", errors.New("reason: 1 to 300 characters")
 	}
-	a.c.St.Lock()
+	for i, id := range in.IDs {
+		in.IDs[i] = strings.TrimPrefix(strings.TrimSpace(id), "id:")
+	}
+	if !a.c.St.LockWithin(toolWait) {
+		return a.queueMarks(in.IDs, in.Reason)
+	}
 	defer a.c.St.Unlock()
 	var marked, missing []string
 	for _, id := range in.IDs {
-		id = strings.TrimPrefix(strings.TrimSpace(id), "id:")
 		e, err := a.c.MarkWrongBy(id, "assistant", in.Reason)
 		if err != nil {
 			missing = append(missing, id)
@@ -420,6 +508,7 @@ func (a *app) markWrongTool(ctx context.Context, raw json.RawMessage) (string, e
 		if err := a.c.St.Save(); err != nil {
 			return "", err
 		}
+		a.c.Publish()
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Marked wrong: %d entr(ies)", len(marked))

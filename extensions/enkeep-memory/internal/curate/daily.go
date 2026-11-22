@@ -212,7 +212,10 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 		c.clearPause()
 	}
 	// 3. Consolidation (design 5.0): the day's new entries recalled, judged and filed, counted, statuses settled.
-	if len(units) > 0 {
+	// Only a day the model really read counts as active (design v2 D.5, E4): a day without a model, or one whose
+	// units were all screened out before any call, is not counted, or the reruns' empty days would put entries to
+	// sleep early. A unit read before with the same prompt and reused counts as read.
+	if len(units) > 0 && dayRead(metered, run) {
 		c.MarkActive(day)
 	}
 	if !dry {
@@ -708,7 +711,7 @@ func itemGate(w *verify.Window, class string, it schema.Item, ev []store.Evidenc
 	assistant, weakSelf := false, false
 	for _, e := range ev {
 		l := w.All[e.N]
-		if w.Kind == "mail" && speaker.Quoted(l.Body, e.Quote) {
+		if speaker.QuotedIn(w.Kind, l.Body, e.Quote) { // mail, and group quote blocks (design v2 §4.2)
 			continue
 		}
 		switch role := voice.Role(l, w.Kind); {
@@ -1176,4 +1179,13 @@ func (c *Curator) Triage(ctx context.Context, day string) ([]triage.Decision, er
 		}
 	}
 	return out, nil
+}
+
+// dayRead tells whether the daily pass had model output for the day: a successful call, or a unit read before and
+// reused.
+func dayRead(metered *model.Metered, run *store.Run) bool {
+	if metered != nil && metered.Calls > 0 {
+		return true
+	}
+	return run.Counts["digested"]+run.Counts["digest_unchanged"] > 0
 }
