@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,8 +22,9 @@ import (
 
 const (
 	uploadTimeout = 60 * time.Second
-	uploadTries   = 3
 	mediaImage    = 1 // getuploadurl's media_type for a picture (UploadMediaType.IMAGE)
+	// cdnAnswerMost is how much of the CDN's answer body is read (and dropped) so its connection can be used again.
+	cdnAnswerMost = 64 << 10
 )
 
 // cdnUploadBase is where a picture goes when getuploadurl names only an encrypted parameter.
@@ -71,12 +73,8 @@ func (c *Client) UploadImage(ctx context.Context, peer string, data []byte) (Upl
 	if err != nil {
 		return Uploaded{}, err
 	}
-	var query string
-	for attempt := range uploadTries {
-		if query, err = c.putCDN(ctx, target, cipher); err == nil || !Retryable(err) || attempt == uploadTries-1 {
-			break
-		}
-	}
+	// One try: the caller tries a failure that may pass again, waiting between tries, with a fresh upload URL.
+	query, err := c.putCDN(ctx, target, cipher)
 	if err != nil {
 		return Uploaded{}, err
 	}
@@ -118,6 +116,7 @@ func (c *Client) putCDN(ctx context.Context, target string, cipher []byte) (stri
 		}
 		return "", &Error{Code: CodeNetwork, Msg: "picture upload failed", Retry: true, err: err}
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, cdnAnswerMost))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", &Error{Code: CodeHTTP, Msg: fmt.Sprintf("picture upload answered HTTP %d", resp.StatusCode),

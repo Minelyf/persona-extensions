@@ -136,7 +136,7 @@ func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelS
 }
 
 // sendImage uploads one of the hub's pictures to WeChat's CDN and sends it, trying a failure that may pass again
-// twice more. id is the same on every attempt and every send of the same ref: iLink keeps the picture once. A
+// twice more, after sendRetryWait and then twice that (UploadImage itself tries once). id is the same on every attempt and every send of the same ref: iLink keeps the picture once. A
 // picture that isn't one (not base64, empty, too large) is logged and skipped, not tried again.
 func (b *Bot) sendImage(ctx context.Context, c *ilink.Client, peer, contextToken, id string, img wire.ChannelBlob) bool {
 	data, err := base64.StdEncoding.DecodeString(img.Data)

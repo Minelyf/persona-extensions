@@ -603,11 +603,11 @@ func TestSendSendsPicturesAfterTheText(t *testing.T) {
 		}
 	}
 	r.ilink.mu.Unlock()
-	if len(reqs) != 2 {
+	if len(reqs) != 3 { // the first picture's failed upload is tried again with a new upload URL
 		t.Fatalf("%d getuploadurl calls", len(reqs))
 	}
 	for i, req := range reqs {
-		src := [][]byte{pic1, pic2}[i]
+		src := [][]byte{pic1, pic1, pic2}[i]
 		sum := md5.Sum(src)
 		if req["media_type"] != float64(1) || req["to_user_id"] != owner || req["rawsize"] != float64(len(src)) ||
 			req["rawfilemd5"] != hex.EncodeToString(sum[:]) || req["filesize"] != float64((len(src)/16+1)*16) ||
@@ -659,5 +659,11 @@ func TestSendPictureFailures(t *testing.T) {
 	}
 	if pics, _ := r.ilink.sentPictures(t); len(pics) != 0 {
 		t.Fatalf("sent %d pictures", len(pics))
+	}
+	r.ilink.mu.Lock()
+	tries := 100 - r.ilink.failUploads
+	r.ilink.mu.Unlock()
+	if tries != 3 { // three tries in all, each after a wait: no burst of uploads within a try
+		t.Fatalf("the CDN got %d uploads of a refused picture, want 3", tries)
 	}
 }
