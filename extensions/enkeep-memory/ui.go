@@ -81,9 +81,12 @@ func (a *app) home(ctx context.Context, r *ext.UIRequest) (*wire.View, error) {
 		v = a.v4Open(t, s)
 	case s.Open == "" && a.v4Tab(s.Tab):
 		v = a.v4List(ctx, t, s)
-		v.Tabs = &wire.Tabs{Name: "tab", Value: s.Tab, Items: v4Tabs(t), Action: wire.Action{ID: "tab"}}
-		if n := len(a.pending()); n > 0 {
-			v.Tabs.Items[5].Badge = fmt.Sprint(n)
+		// The switches, the reports and the older pages are opened on top of the start page (moreSection): no bar.
+		if bar := barTabs(t); slices.ContainsFunc(bar, func(x wire.Tab) bool { return x.Value == s.Tab }) {
+			v.Tabs = &wire.Tabs{Name: "tab", Value: s.Tab, Items: bar, Action: wire.Action{ID: "tab"}}
+			if n := len(a.pending()); n > 0 {
+				v.Tabs.Items[len(bar)-1].Badge = fmt.Sprint(n) // 待确认
+			}
 		}
 	case strings.HasPrefix(s.Open, "K-"):
 		v = a.proposalPage(s)
