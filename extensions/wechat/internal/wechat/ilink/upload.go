@@ -137,8 +137,10 @@ func (c *Client) SendImage(ctx context.Context, peer, contextToken, clientID str
 		return &Error{Code: CodeProtocol, Msg: "incomplete iLink picture message"}
 	}
 	item := map[string]any{"type": itemImage, "image_item": map[string]any{
-		// aes_key is base64 of the key's hex text, as openclaw-weixin sends it (and as mediaKey reads it back).
+		// The key goes both ways WeChat carries it: media.aes_key is base64 of the key's hex text, as openclaw-weixin
+		// sends it, and the image's own aeskey is the hex key, which is where a received picture has it (message.go).
 		"media":    map[string]any{"encrypt_query_param": u.Query, "aes_key": base64.StdEncoding.EncodeToString([]byte(u.KeyHex)), "encrypt_type": 1},
+		"aeskey":   u.KeyHex,
 		"mid_size": u.CipherSize,
 	}}
 	msg := map[string]any{

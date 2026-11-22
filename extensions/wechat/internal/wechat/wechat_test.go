@@ -88,6 +88,7 @@ type sentText struct{ To, Context, Text string }
 // sentPicture is an image_item the bot sent: where its picture is and its key as sent (base64 of the hex key).
 type sentPicture struct {
 	To, Context, Query, AESKey string
+	ItemKey                    string // the image_item's own aeskey: the hex key
 	EncryptType, MidSize       float64
 }
 
@@ -148,7 +149,7 @@ func (f *fakeILink) serve(w http.ResponseWriter, r *http.Request) {
 			if pic, ok := item["image_item"].(map[string]any); ok {
 				media := pic["media"].(map[string]any)
 				f.pictures = append(f.pictures, sentPicture{To: msg["to_user_id"].(string), Context: msg["context_token"].(string),
-					Query: media["encrypt_query_param"].(string), AESKey: media["aes_key"].(string),
+					Query: media["encrypt_query_param"].(string), AESKey: media["aes_key"].(string), ItemKey: fmt.Sprint(pic["aeskey"]),
 					EncryptType: media["encrypt_type"].(float64), MidSize: pic["mid_size"].(float64)})
 			} else {
 				f.sent = append(f.sent, sentText{To: msg["to_user_id"].(string), Context: msg["context_token"].(string),
@@ -227,6 +228,9 @@ func (f *fakeILink) sentPictures(t *testing.T) ([]sentPicture, [][]byte) {
 		key, err := hex.DecodeString(string(keyHex))
 		if err != nil || len(key) != 16 {
 			t.Fatalf("aes_key is not base64 of a hex key: %q", keyHex)
+		}
+		if p.ItemKey != string(keyHex) { // a receiver reads an image's key from its aeskey, as message.go does
+			t.Fatalf("image_item aeskey %q, want the hex key %q", p.ItemKey, keyHex)
 		}
 		data, err := ilink.DecryptECB(f.uploads[p.Query], key)
 		if err != nil {
