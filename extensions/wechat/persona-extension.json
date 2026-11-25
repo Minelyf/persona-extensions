@@ -20,7 +20,7 @@
     "connectors": [{"id": "wechat", "name": "微信", "capabilities": ["status", "login"]}],
     "channel": [{
       "id": "wechat", "name": "微信", "kind": "im", "connector": "wechat", "bind": "qr",
-      "description": "在个人微信里私聊机器人：扫码绑定，消息进主对话，回答以纯文字发回",
+      "description": "在个人微信里私聊机器人：扫码绑定，消息进主对话，回答以文字和图片发回",
       "capabilities": {"images_in": true, "images_out": true, "files_in": true, "voice_in": true, "format": "plain", "max_text": 3500, "asks": "text", "push": true, "typing": true}
     }]
   },
