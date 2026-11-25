@@ -26,17 +26,20 @@ const (
 var hexColorRE = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 
 type sceneFix struct {
-	Rotate     *float64     `json:"rotate,omitempty"`
-	WallHeight *float64     `json:"wall_height,omitempty"`
-	Drop       []string     `json:"drop,omitempty"`
-	Walls      []fixWall    `json:"walls,omitempty"`
-	Doors      []fixDoor    `json:"doors,omitempty"`
-	Split      []fixSplit   `json:"split,omitempty"`
-	Openings   []fixOpening `json:"openings,omitempty"`
-	Rooms      []fixRoom    `json:"rooms,omitempty"`
-	Objects    []fixObject  `json:"objects,omitempty"`
-	Add        []fixAdd     `json:"add,omitempty"`
-	Devices    []fixDevice  `json:"devices,omitempty"`
+	Rotate        *float64     `json:"rotate,omitempty"`
+	WallHeight    *float64     `json:"wall_height,omitempty"`
+	WallThickness *float64     `json:"wall_thickness,omitempty"`
+	Drop          []string     `json:"drop,omitempty"`
+	Walls         []fixWall    `json:"walls,omitempty"`
+	Doors         []fixDoor    `json:"doors,omitempty"`
+	Split         []fixSplit   `json:"split,omitempty"`
+	Openings      []fixOpening `json:"openings,omitempty"`
+	Rooms         []fixRoom    `json:"rooms,omitempty"`
+	Objects       []fixObject  `json:"objects,omitempty"`
+	Add           []fixAdd     `json:"add,omitempty"`
+	Curtains      []fixCurtain `json:"curtains,omitempty"`
+	WallFaces     []fixCurtain `json:"wall_faces,omitempty"`
+	Devices       []fixDevice  `json:"devices,omitempty"`
 }
 
 type fixWall struct {
@@ -119,9 +122,23 @@ type fixRoom struct {
 	WallColor  string      `json:"wall_color,omitempty"`
 }
 
+// fixObject changes a scanned object: its kind and color, and where the scan put it (center, size, yaw, bottom, top),
+// for an object the scan placed or sized wrong.
 type fixObject struct {
-	Name  string `json:"name"`
-	Kind  string `json:"kind"`
+	Name   string    `json:"name"`
+	Kind   string    `json:"kind"`
+	Color  string    `json:"color,omitempty"`
+	Center []float64 `json:"center,omitempty"`
+	Size   []float64 `json:"size,omitempty"`
+	Yaw    *float64  `json:"yaw,omitempty"`
+	Bottom *float64  `json:"bottom,omitempty"`
+	Top    *float64  `json:"top,omitempty"`
+}
+
+// fixCurtain hangs curtains at both sides of every window and glass door in a wall, on the named room's side.
+type fixCurtain struct {
+	Wall  string `json:"wall"`
+	Room  string `json:"room,omitempty"`
 	Color string `json:"color,omitempty"`
 }
 
@@ -181,6 +198,9 @@ func parseSceneFix(raw []byte) (*sceneFix, error) {
 	}
 	if fix.WallHeight != nil && (!isFinite(*fix.WallHeight) || *fix.WallHeight < 0.05 || *fix.WallHeight > 10) {
 		return nil, fmt.Errorf("%s: wall_height must be between 0.05 and 10 m", sceneFixFile)
+	}
+	if fix.WallThickness != nil && (!isFinite(*fix.WallThickness) || *fix.WallThickness < 0.04 || *fix.WallThickness > 1) {
+		return nil, fmt.Errorf("%s: wall_thickness must be between 0.04 and 1 m", sceneFixFile)
 	}
 	for i, w := range fix.Walls {
 		a, ok1 := checkCoord2(w.From)
@@ -255,6 +275,38 @@ func parseSceneFix(raw []byte) (*sceneFix, error) {
 		if ob.Color != "" && !hexColorRE.MatchString(ob.Color) {
 			return nil, fmt.Errorf("%s: objects[%d].color must be #RRGGBB", sceneFixFile, i)
 		}
+		if len(ob.Center) > 0 {
+			if _, ok := checkCoord2(ob.Center); !ok {
+				return nil, fmt.Errorf("%s: objects[%d].center must be [x, y]", sceneFixFile, i)
+			}
+		}
+		if len(ob.Size) > 0 && (len(ob.Size) != 2 || !isFinite(ob.Size[0]) || !isFinite(ob.Size[1]) ||
+			ob.Size[0] < 0.02 || ob.Size[1] < 0.02 || ob.Size[0] > 100 || ob.Size[1] > 100) {
+			return nil, fmt.Errorf("%s: objects[%d].size must be positive [width, depth]", sceneFixFile, i)
+		}
+		if ob.Yaw != nil && !isFinite(*ob.Yaw) {
+			return nil, fmt.Errorf("%s: objects[%d].yaw must be finite", sceneFixFile, i)
+		}
+		if (ob.Bottom != nil && (!isFinite(*ob.Bottom) || *ob.Bottom < 0)) || (ob.Top != nil && (!isFinite(*ob.Top) || *ob.Top <= 0)) ||
+			(ob.Bottom != nil && ob.Top != nil && *ob.Top <= *ob.Bottom) {
+			return nil, fmt.Errorf("%s: objects[%d] heights are invalid", sceneFixFile, i)
+		}
+	}
+	for i, cu := range fix.Curtains {
+		if strings.TrimSpace(cu.Wall) == "" {
+			return nil, fmt.Errorf("%s: curtains[%d] needs a wall", sceneFixFile, i)
+		}
+		if cu.Color != "" && !hexColorRE.MatchString(cu.Color) {
+			return nil, fmt.Errorf("%s: curtains[%d].color must be #RRGGBB", sceneFixFile, i)
+		}
+	}
+	for i, wf := range fix.WallFaces {
+		if strings.TrimSpace(wf.Wall) == "" || strings.TrimSpace(wf.Room) == "" {
+			return nil, fmt.Errorf("%s: wall_faces[%d] needs a wall and a room", sceneFixFile, i)
+		}
+		if !hexColorRE.MatchString(wf.Color) {
+			return nil, fmt.Errorf("%s: wall_faces[%d].color must be #RRGGBB", sceneFixFile, i)
+		}
 	}
 	for i, ad := range fix.Add {
 		if strings.TrimSpace(ad.Kind) == "" {
@@ -307,6 +359,8 @@ type planWall struct {
 	Name      string
 	A, B      [2]float64
 	Thickness float64
+	// how far the wall is drawn past A and past B (negative: short of it), so it meets the walls it joins
+	ReachA, ReachB float64
 }
 
 type planRoom struct {
@@ -329,6 +383,8 @@ type fixedPlan struct {
 	Floor        [][2]float64
 	Rooms        []planRoom
 	ScanRooms    []scanRoom
+	Curtains     []fixCurtain
+	WallFaces    []fixCurtain
 	Devices      []fixDevice
 }
 
@@ -360,6 +416,8 @@ func applySceneFix(sc *scan, fix *sceneFix) *fixedPlan {
 	fp := &fixedPlan{
 		WallHeight:   wallH,
 		WallOpenings: slices.Clone(fix.Openings),
+		Curtains:     slices.Clone(fix.Curtains),
+		WallFaces:    slices.Clone(fix.WallFaces),
 		Devices:      slices.Clone(fix.Devices),
 	}
 
@@ -488,6 +546,22 @@ func applySceneFix(sc *scan, fix *sceneFix) *fixedPlan {
 			if ov.Color != "" {
 				ob.Color = ov.Color
 			}
+			if pt, ok := checkCoord2(ov.Center); ok {
+				ob.Center = pt
+			}
+			if len(ov.Size) == 2 {
+				ob.Size = [2]float64{ov.Size[0], ov.Size[1]}
+			}
+			if ov.Yaw != nil {
+				ob.Yaw, ob.FixedYaw = normAngle(*ov.Yaw), true
+			}
+			if ov.Bottom != nil {
+				ob.Bottom = *ov.Bottom
+			}
+			if ov.Top != nil {
+				ob.Top = *ov.Top
+			}
+			ob.Top = max(ob.Top, ob.Bottom+0.06)
 		}
 		fp.Objects = append(fp.Objects, ob)
 	}
@@ -515,6 +589,13 @@ func applySceneFix(sc *scan, fix *sceneFix) *fixedPlan {
 			Yaw: yaw, FixedYaw: fixedYaw, Bottom: ad.Bottom, Top: top, Color: ad.Color,
 		})
 	}
+
+	if fix.WallThickness != nil {
+		for i := range fp.Walls {
+			fp.Walls[i].Thickness = *fix.WallThickness
+		}
+	}
+	joinWallEnds(fp.Walls)
 
 	if len(sc.Floor) >= 3 {
 		poly := make([][2]float64, len(sc.Floor))
@@ -595,6 +676,10 @@ func defaultObjectSize(kind string) [2]float64 {
 		return [2]float64{1.4, 0.8}
 	case "coffee_table":
 		return [2]float64{1.1, 0.6}
+	case "round_coffee_table":
+		return [2]float64{0.8, 0.8}
+	case "bench":
+		return [2]float64{0.7, 0.32}
 	case "chair":
 		return [2]float64{0.48, 0.48}
 	case "piano":
@@ -624,8 +709,8 @@ func defaultObjectHeight(kind string) float64 {
 		return 0.75
 	case "bar_table":
 		return 1.05
-	case "coffee_table":
-		return 0.42
+	case "coffee_table", "round_coffee_table", "bench":
+		return 0.45
 	case "chair":
 		return 0.82
 	case "piano":
@@ -642,5 +727,99 @@ func defaultObjectHeight(kind string) float64 {
 		return 0.76
 	default:
 		return 0.85
+	}
+}
+
+// wallJoinReach is how far a wall's end may lie from another wall's line to be joined to it.
+const wallJoinReach = 0.15
+
+// joinWallEnds closes the gaps where walls meet. A scan ends a wall at the face of the one it meets, so with a thinner
+// wall_thickness every corner and T opens a gap the other wall's side shows through (a sliver of another room's color).
+// An end near another, crossing wall is drawn on (or short) along its own line (ReachA, ReachB; A and B stay, as
+// openings and splits are measured from them): at a T (or where the other wall goes on past) it
+// stops at that wall's near face; at an L corner the earlier wall runs through to the other's outer face and the later
+// one stops at its inner face, so no faces of two walls overlap. Parallel neighbours are left alone.
+func joinWallEnds(walls []planWall) {
+	reach := make([][2]float64, len(walls))
+	dir := func(w planWall) ([2]float64, float64) {
+		L := dist2D(w.A, w.B)
+		if L < 1e-9 {
+			return [2]float64{}, 0
+		}
+		return [2]float64{(w.B[0] - w.A[0]) / L, (w.B[1] - w.A[1]) / L}, L
+	}
+	// nearEnd says whether p lies within wallJoinReach of an end of w; continued says some other wall (not skip)
+	// carries w's line on past that end.
+	nearEnd := func(w planWall, p [2]float64) ([2]float64, bool) {
+		switch {
+		case dist2D(w.A, p) <= wallJoinReach:
+			return w.A, true
+		case dist2D(w.B, p) <= wallJoinReach:
+			return w.B, true
+		}
+		return [2]float64{}, false
+	}
+	continued := func(pi, skip int, end [2]float64) bool {
+		up, _ := dir(walls[pi])
+		for k, o := range walls {
+			if k == pi || k == skip {
+				continue
+			}
+			uo, _ := dir(o)
+			if math.Abs(up[0]*uo[1]-up[1]*uo[0]) > 0.1 {
+				continue
+			}
+			if dist2D(o.A, end) <= wallJoinReach || dist2D(o.B, end) <= wallJoinReach {
+				return true
+			}
+		}
+		return false
+	}
+	for qi, q := range walls {
+		uq, lq := dir(q)
+		if lq < 0.05 {
+			continue
+		}
+		for endIdx, e := range [][2]float64{q.A, q.B} {
+			out0 := uq // from the wall's inside toward this end
+			if endIdx == 0 {
+				out0 = [2]float64{-uq[0], -uq[1]}
+			}
+			best, bestD := -1, wallJoinReach
+			var bestX [2]float64
+			for pi, p := range walls {
+				if pi == qi {
+					continue
+				}
+				up, lp := dir(p)
+				cross := uq[0]*up[1] - uq[1]*up[0]
+				if lp < 0.05 || math.Abs(cross) < 0.7 {
+					continue
+				}
+				// where q's line crosses p's line, and how far along p
+				t := ((p.A[0]-e[0])*up[1] - (p.A[1]-e[1])*up[0]) / cross
+				x := [2]float64{e[0] + uq[0]*t, e[1] + uq[1]*t}
+				along := (x[0]-p.A[0])*up[0] + (x[1]-p.A[1])*up[1]
+				if along < -wallJoinReach || along > lp+wallJoinReach {
+					continue
+				}
+				if d := math.Abs(t); d < bestD {
+					best, bestD, bestX = pi, d, x
+				}
+			}
+			if best < 0 {
+				continue
+			}
+			p := walls[best]
+			half := p.Thickness / 2
+			if pe, ok := nearEnd(p, bestX); ok && qi < best && !continued(best, qi, pe) {
+				half = -half // an L corner this wall runs through
+			}
+			end := [2]float64{bestX[0] - out0[0]*half, bestX[1] - out0[1]*half}
+			reach[qi][endIdx] = (end[0]-e[0])*out0[0] + (end[1]-e[1])*out0[1]
+		}
+	}
+	for i := range walls {
+		walls[i].ReachA, walls[i].ReachB = reach[i][0], reach[i][1]
 	}
 }

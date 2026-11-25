@@ -78,8 +78,8 @@ func TestSceneCheckView(t *testing.T) {
 	if comp.Caption != "1 盏灯开着" {
 		t.Errorf("caption = %q, want 1 盏灯开着", comp.Caption)
 	}
-	if len(comp.Labels) != 2 {
-		t.Errorf("labels = %+v, want 2 room labels", comp.Labels)
+	if len(comp.Labels) != 0 {
+		t.Errorf("labels = %+v, want none: room names are in alt only", comp.Labels)
 	}
 
 	// Window1 (bottom 0.8 < wall_height 1.1) produces a glass box from 0.8 to 1.1.
@@ -101,7 +101,8 @@ func TestSceneCheckView(t *testing.T) {
 	compLow := buildScene(parsed, &sceneFix{WallHeight: &lowWall}, hm)
 	checkSceneView(t, compLow)
 	for _, s := range compLow.Shapes {
-		if s.Material == wire.SceneMaterialGlass {
+		// window glass (furniture drawn see-through is glass too, in its own color)
+		if s.Material == wire.SceneMaterialGlass && s.Color == "#B8D8E8" {
 			t.Errorf("unexpected glass window above wall_height=0.7: %+v", s)
 		}
 	}
@@ -133,18 +134,36 @@ func TestSceneDoorCuts(t *testing.T) {
 		math.Abs(wallBoxes[1].Center[0]-3.25) > 1e-3 || math.Abs(wallBoxes[1].Size[0]-1.5) > 1e-3 {
 		t.Errorf("split wall boxes = %+v, want centres 0.75 and 3.25 of length 1.5", wallBoxes)
 	}
-	if len(woodLeaves) != 1 || math.Abs(woodLeaves[0].Center[0]-2.0) > 1e-3 || math.Abs(woodLeaves[0].Size[0]-1.0) > 1e-3 {
-		t.Errorf("closed door leaf = %+v", woodLeaves)
+	// A frame's two jambs beside the gap, and the closed leaf filling it.
+	var leaves, jambs []wire.SceneShape
+	for _, s := range woodLeaves {
+		if s.Color == frameColor {
+			jambs = append(jambs, s)
+		} else {
+			leaves = append(leaves, s)
+		}
+	}
+	if len(leaves) != 1 || math.Abs(leaves[0].Center[0]-2.0) > 1e-3 || math.Abs(leaves[0].Size[0]-1.0) > 1e-3 {
+		t.Errorf("closed door leaf = %+v", leaves)
+	}
+	if len(jambs) != 2 || math.Abs(jambs[0].Center[0]-1.475) > 1e-3 || math.Abs(jambs[1].Center[0]-2.525) > 1e-3 {
+		t.Errorf("door frame = %+v, want jambs at 1.475 and 2.525", jambs)
 	}
 
-	// Open door draws as a low threshold only; sliding_glass draws as a glass panel beside the gap.
+	// An open door's leaf is swung 90 degrees out of the wall, hinged at one end of the gap; sliding_glass draws as a
+	// glass panel beside the gap.
 	openTrue := true
 	compOpen := buildScene(sc, &sceneFix{Doors: []fixDoor{{Name: "DoorMid", Open: &openTrue}}}, nil)
 	checkSceneView(t, compOpen)
+	var swung []wire.SceneShape
 	for _, s := range compOpen.Shapes {
-		if s.Material == wire.SceneMaterialWood && *s.Top > 0.03 {
-			t.Errorf("open door drew tall leaf: top=%g", *s.Top)
+		if s.Material == wire.SceneMaterialWood && s.Color != frameColor {
+			swung = append(swung, s)
 		}
+	}
+	if len(swung) != 1 || math.Abs(swung[0].Size[1]-1.0) > 1e-3 || math.Abs(math.Abs(swung[0].Center[1])-0.5) > 1e-3 ||
+		math.Abs(math.Abs(swung[0].Center[0]-2.0)-0.48) > 1e-3 {
+		t.Errorf("open door leaf = %+v, want a 1 m leaf out of the wall at one end of the gap", swung)
 	}
 
 	compGlass := buildScene(sc, &sceneFix{Doors: []fixDoor{{Name: "DoorMid", Kind: "sliding_glass", Open: &openTrue}}}, nil)
@@ -209,12 +228,16 @@ func TestSceneCorrections(t *testing.T) {
 
 	comp := buildScene(parsed, fix, nil)
 	checkSceneView(t, comp)
-	if len(comp.Labels) != 2 || comp.Labels[0].Text != "起居室" || comp.Labels[1].Text != "主卧" {
-		t.Errorf("labels = %+v", comp.Labels)
+	labels, _ := buildRoomLabels(applySceneFix(parsed, fix))
+	if len(labels) != 2 || labels[0].Text != "起居室" || labels[1].Text != "主卧" {
+		t.Errorf("labels = %+v", labels)
 	}
-	if math.Hypot(comp.Labels[0].At[0]-2.0, comp.Labels[0].At[1]-1.5) > 1e-4 ||
-		math.Hypot(comp.Labels[1].At[0]-5.5, comp.Labels[1].At[1]-1.5) > 1e-4 {
-		t.Errorf("label centroids = %+v", comp.Labels)
+	if math.Hypot(labels[0].At[0]-2.0, labels[0].At[1]-1.5) > 1e-4 ||
+		math.Hypot(labels[1].At[0]-5.5, labels[1].At[1]-1.5) > 1e-4 {
+		t.Errorf("label centroids = %+v", labels)
+	}
+	if !strings.Contains(comp.Alt, "起居室") || !strings.Contains(comp.Alt, "主卧") {
+		t.Errorf("alt = %q, want the renamed rooms", comp.Alt)
 	}
 	hasLivingWallColor := slices.ContainsFunc(comp.Shapes, func(s wire.SceneShape) bool { return s.Color == "#C4DEEE" })
 	hasSideboardColor := slices.ContainsFunc(comp.Shapes, func(s wire.SceneShape) bool { return s.Color == "#3A3A3E" })
@@ -710,5 +733,34 @@ func TestSceneWatchInvalidatesOnStateChange(t *testing.T) {
 	vAfter, _ := renderV(t, a, 11, nil)
 	if vAfter.Sections[0].Items[0].Caption != "3 盏灯开着" {
 		t.Fatalf("caption after state_changed = %q, want 3 盏灯开着", vAfter.Sections[0].Items[0].Caption)
+	}
+}
+
+// A wall switch's indicator light is a light entity that is on, but a setting of the switch (entity_category config),
+// not a lamp: the caption counts only lamps, as the rest of the page does (#940).
+func TestSceneCaptionLeavesIndicatorLightsOut(t *testing.T) {
+	parsed, err := readRoomPlan(syntheticHomeUSDZ(t, nil))
+	if err != nil {
+		t.Fatalf("readRoomPlan: %v", err)
+	}
+	reg := &Registry{Entities: map[string]RegEntity{
+		"light.switch_a_indicator": {EntityCategory: "config"},
+		"light.switch_b_indicator": {EntityCategory: "config"},
+		"light.living":             {},
+	}}
+	build := func(living string) wire.Component {
+		states := []State{
+			{EntityID: "light.switch_a_indicator", State: "on", Attributes: map[string]any{"friendly_name": "开关 A 指示灯"}},
+			{EntityID: "light.switch_b_indicator", State: "on", Attributes: map[string]any{"friendly_name": "开关 B 指示灯"}},
+			{EntityID: "light.living", State: living, Attributes: map[string]any{"friendly_name": "客厅吸顶灯"}},
+		}
+		hm := buildHome(Config{}, states, []Area{{ID: "living", Name: "客厅", Entities: []string{"light.living"}}}, nil)
+		return newApp(t.Logf).buildSceneWith(parsed, &sceneFix{}, hm, reg)
+	}
+	if c := build("off").Caption; c != "" {
+		t.Errorf("every lamp off: caption %q, want none", c)
+	}
+	if c := build("on").Caption; c != "1 盏灯开着" {
+		t.Errorf("one lamp on: caption %q, want 1 盏灯开着", c)
 	}
 }

@@ -37,6 +37,7 @@ const (
 	neutralWallColor  = "#ECE7DE"
 	neutralTileColor  = "#EAE4DA"
 	defaultWoodColor  = "#C8A882"
+	sceneCameraYaw    = 225.0 // the view the scene opens at, and its poster's
 )
 
 type fileStamp struct {
@@ -386,11 +387,16 @@ func (a *app) buildSceneWith(sc *scan, fix *sceneFix, hm *home, reg *Registry) w
 		shapes = []wire.SceneShape{sceneBox([2]float64{0, 0}, [2]float64{1, 1}, 0, 0, -0.02, 0, neutralTileColor, wire.SceneMaterialTile)}
 	}
 
-	labels, roomNames := buildRoomLabels(fp)
+	// Room names go in alt only: drawn on the floor they crowd the device pins, which already say what each one is (#1029).
+	_, roomNames := buildRoomLabels(fp)
 	devs := a.matchScannedTVs(fp, hm, reg)
 	pins, pinnedLightsOn := a.buildScenePins(devs, hm, reg)
+	// an air conditioner on the wall at each pinned one, when the walls are tall enough to hold it
+	if ac := airConditionerShapes(pins, fp.Walls, fp.WallHeight); len(shapes)+len(ac) <= sceneShapesBudget {
+		shapes = append(shapes, ac...)
+	}
 
-	lightsOn := countHomeLightsOn(hm, devs, pinnedLightsOn)
+	lightsOn := countHomeLightsOn(hm, reg, devs, pinnedLightsOn)
 	caption := ""
 	if lightsOn > 0 {
 		caption = fmt.Sprintf("%d 盏灯开着", lightsOn)
@@ -401,7 +407,7 @@ func (a *app) buildSceneWith(sc *scan, fix *sceneFix, hm *home, reg *Registry) w
 		alt = clip("家的三维视图："+strings.Join(roomNames, "、"), 200)
 	}
 
-	camYaw, camPitch, camZoom := 225.0, 35.0, 1.0
+	camYaw, camPitch, camZoom := sceneCameraYaw, 35.0, 1.0
 	return wire.Component{
 		Type:    wire.ComponentScene,
 		Key:     "home3d",
@@ -409,7 +415,6 @@ func (a *app) buildSceneWith(sc *scan, fix *sceneFix, hm *home, reg *Registry) w
 		Caption: caption,
 		Camera:  &wire.SceneCamera{Yaw: &camYaw, Pitch: &camPitch, Zoom: &camZoom},
 		Shapes:  shapes,
-		Labels:  labels,
 		Pins:    pins,
 	}
 }
@@ -458,6 +463,7 @@ func buildWallsAndOpenings(fp *fixedPlan) []wire.SceneShape {
 		top       float64
 		open      bool
 		kind      string
+		host      int
 	}
 	var doors []placedDoor
 	for _, d := range fp.Doors {
@@ -474,7 +480,7 @@ func buildWallsAndOpenings(fp *fixedPlan) []wire.SceneShape {
 				doors = append(doors, placedDoor{
 					center: [2]float64{hw.A[0] + ux*mid, hw.A[1] + uy*mid}, width: hi - lo, thickness: hw.Thickness,
 					yaw: math.Atan2(uy, ux) * 180 / math.Pi, nx: -uy, ny: ux, ux: ux, uy: uy,
-					top: d.Top, open: d.Open, kind: d.Kind,
+					top: d.Top, open: d.Open, kind: d.Kind, host: idx,
 				})
 				continue
 			}
@@ -483,7 +489,7 @@ func buildWallsAndOpenings(fp *fixedPlan) []wire.SceneShape {
 		ux, uy := math.Cos(rad), math.Sin(rad)
 		doors = append(doors, placedDoor{
 			center: d.Center, width: w, thickness: max(d.Size[1], 0.08),
-			yaw: d.Yaw, nx: -uy, ny: ux, ux: ux, uy: uy, top: d.Top, open: d.Open, kind: d.Kind,
+			yaw: d.Yaw, nx: -uy, ny: ux, ux: ux, uy: uy, top: d.Top, open: d.Open, kind: d.Kind, host: -1,
 		})
 	}
 
@@ -515,17 +521,19 @@ func buildWallsAndOpenings(fp *fixedPlan) []wire.SceneShape {
 				doors = append(doors, placedDoor{
 					center: [2]float64{w.A[0] + ux*mid, w.A[1] + uy*mid}, width: hi - lo, thickness: w.Thickness,
 					yaw: math.Atan2(uy, ux) * 180 / math.Pi, nx: -uy, ny: ux, ux: ux, uy: uy,
-					top: wallH, open: false, kind: "sliding_glass",
+					top: wallH, open: false, kind: "sliding_glass", host: i,
 				})
 			}
 		}
 	}
 
 	type placedWin struct {
-		center [2]float64
-		width  float64
-		yaw    float64
-		bottom float64
+		center    [2]float64
+		width     float64
+		thickness float64
+		yaw       float64
+		bottom    float64
+		host      int
 	}
 	var wins []placedWin
 	for _, wn := range fp.Windows {
@@ -543,13 +551,13 @@ func buildWallsAndOpenings(fp *fixedPlan) []wire.SceneShape {
 				spans[idx] = append(spans[idx], wallSpan{from: lo, to: hi, sillTop: wb})
 				mid := (lo + hi) / 2
 				wins = append(wins, placedWin{
-					center: [2]float64{hw.A[0] + ux*mid, hw.A[1] + uy*mid}, width: hi - lo,
-					yaw: math.Atan2(uy, ux) * 180 / math.Pi, bottom: wb,
+					center: [2]float64{hw.A[0] + ux*mid, hw.A[1] + uy*mid}, width: hi - lo, thickness: hw.Thickness,
+					yaw: math.Atan2(uy, ux) * 180 / math.Pi, bottom: wb, host: idx,
 				})
 				continue
 			}
 		}
-		wins = append(wins, placedWin{center: wn.Center, width: w, yaw: wn.Yaw, bottom: wb})
+		wins = append(wins, placedWin{center: wn.Center, width: w, thickness: 0.08, yaw: wn.Yaw, bottom: wb, host: -1})
 	}
 
 	var shapes []wire.SceneShape
@@ -560,36 +568,87 @@ func buildWallsAndOpenings(fp *fixedPlan) []wire.SceneShape {
 		}
 		ux, uy := (w.B[0]-w.A[0])/L, (w.B[1]-w.A[1])/L
 		yaw := math.Atan2(uy, ux) * 180 / math.Pi
-		col := wallColorFor(w, fp.Rooms)
+		th := max(w.Thickness, 0.04)
+		nx, ny := -uy, ux
 
 		for _, pc := range splitWallPieces(L, wallH, spans[i]) {
+			// drawn on to (or short of) the walls it meets
+			if pc.from < 1e-4 {
+				pc.from = -w.ReachA
+			}
+			if pc.to > L-1e-4 {
+				pc.to = L + w.ReachB
+			}
+			if pc.to-pc.from < 0.01 {
+				continue
+			}
 			mid := (pc.from + pc.to) / 2
 			ctr := [2]float64{w.A[0] + ux*mid, w.A[1] + uy*mid}
-			shapes = append(shapes, sceneBox(ctr, [2]float64{pc.to - pc.from, max(w.Thickness, 0.04)}, yaw, 0.01, 0, pc.top, col, wire.SceneMaterialMatte))
+			left, right := wallFaceColors(w, pc.from, pc.to, fp.Rooms, fp.WallFaces)
+			if left == right {
+				wall := sceneBox(ctr, [2]float64{pc.to - pc.from, th}, yaw, 0.01, 0, pc.top, left, wire.SceneMaterialMatte)
+				wall.Wall = true // for the app's cutaway (#947)
+				shapes = append(shapes, wall)
+				continue
+			}
+			// a wall between two differently colored rooms (or a face colored on its own): one layer per face
+			for _, layer := range []struct {
+				side float64
+				col  string
+			}{{1, left}, {-1, right}} {
+				c := [2]float64{ctr[0] + nx*layer.side*th/4, ctr[1] + ny*layer.side*th/4}
+				wall := sceneBox(c, [2]float64{pc.to - pc.from, th / 2}, yaw, 0.005, 0, pc.top, layer.col, wire.SceneMaterialMatte)
+				wall.Wall = true
+				shapes = append(shapes, wall)
+			}
 		}
 	}
 
 	for _, d := range doors {
-		switch {
-		case d.kind == "sliding_glass":
-			// Glass panel beside the gap.
+		if d.kind == "sliding_glass" {
+			// Glass panels in a slim frame: one closed, one slid behind it when open.
 			offN := d.thickness*0.4 + 0.02
 			offU := d.width * 0.25
+			if !d.open {
+				offU = 0
+			}
 			ctr := [2]float64{d.center[0] + d.nx*offN + d.ux*offU, d.center[1] + d.ny*offN + d.uy*offU}
 			shapes = append(shapes, sceneBox(ctr, [2]float64{d.width, 0.03}, d.yaw, 0.005, 0, wallH, "#B8D8E8", wire.SceneMaterialGlass))
-		case d.open:
-			shapes = append(shapes, sceneBox(d.center, [2]float64{d.width, max(d.thickness, 0.08)}, d.yaw, 0.005, 0, 0.015, "#C8BCA8", wire.SceneMaterialWood))
-		default:
-			top := wallH
-			if d.top > 0.05 && d.top < wallH {
-				top = d.top
-			}
-			shapes = append(shapes, sceneBox(d.center, [2]float64{d.width, 0.04}, d.yaw, 0.005, 0, top, "#8B6B4E", wire.SceneMaterialWood))
+			shapes = append(shapes, windowFrameShapes(d.center, d.width, d.thickness, d.yaw, 0, wallH, d.ux, d.uy)...)
+			continue
 		}
+		shapes = append(shapes, doorShapes(d.center, d.width, d.thickness, d.yaw, d.top, wallH, d.open, d.ux, d.uy, d.nx, d.ny, fp.Rooms, fp.Objects)...)
 	}
 
 	for _, wn := range wins {
 		shapes = append(shapes, sceneBox(wn.center, [2]float64{wn.width, 0.03}, wn.yaw, 0.005, wn.bottom, wallH, "#B8D8E8", wire.SceneMaterialGlass))
+		rad := wn.yaw * math.Pi / 180
+		shapes = append(shapes, windowFrameShapes(wn.center, wn.width, wn.thickness, wn.yaw, wn.bottom, wallH, math.Cos(rad), math.Sin(rad))...)
+	}
+
+	// Curtains on the windows and glass doors of the walls home3d.json names.
+	for _, cu := range fp.Curtains {
+		color := cu.Color
+		if color == "" {
+			color = curtainColor
+		}
+		hang := func(host int, center [2]float64, width float64) {
+			if host < 0 || wallBase(walls[host].Name) != cu.Wall {
+				return
+			}
+			ux, uy, nx, ny, _ := wallFrame(walls[host])
+			sgn := curtainSide(center, nx, ny, fp.Rooms, cu.Room)
+			yaw := math.Atan2(uy, ux) * 180 / math.Pi
+			shapes = append(shapes, curtainShapes(center, width, walls[host].Thickness, yaw, wallH, ux, uy, nx, ny, sgn, color)...)
+		}
+		for _, wn := range wins {
+			hang(wn.host, wn.center, wn.width)
+		}
+		for _, d := range doors {
+			if d.kind == "sliding_glass" {
+				hang(d.host, d.center, d.width)
+			}
+		}
 	}
 	return shapes
 }
@@ -642,42 +701,53 @@ func splitWallPieces(length, wallH float64, cuts []wallSpan) []wallPiece {
 	return out
 }
 
-// wallColorFor picks the wall_color of the room the wall faces most, else neutralWallColor.
-func wallColorFor(w planWall, rooms []planRoom) string {
-	if len(rooms) == 0 {
-		return neutralWallColor
-	}
+// wallFaceColors are the colors of a wall's two faces along [from, to] (metres from A): on the left of A→B and on the
+// right. A face takes its wall_faces entry for the room it faces, else that room's wall_color; a face with no room
+// (outdoors) takes the other face's color, and a wall with none neutralWallColor.
+func wallFaceColors(w planWall, from, to float64, rooms []planRoom, faces []fixCurtain) (left, right string) {
 	L := dist2D(w.A, w.B)
 	if L < 0.02 {
-		return neutralWallColor
+		return neutralWallColor, neutralWallColor
 	}
 	ux, uy := (w.B[0]-w.A[0])/L, (w.B[1]-w.A[1])/L
 	nx, ny := -uy, ux
 	probe := w.Thickness/2 + 0.15
-
-	bestIdx, bestHits := -1, 0
-	for ri, rm := range rooms {
-		if rm.WallColor == "" {
-			continue
-		}
-		hits := 0
-		for _, t := range []float64{0.1, 0.3, 0.5, 0.7, 0.9} {
-			px, py := w.A[0]+ux*L*t, w.A[1]+uy*L*t
-			if pointInPolygon([2]float64{px + nx*probe, py + ny*probe}, rm.Polygon) {
-				hits++
+	face := func(side float64) string {
+		best, bestHits := -1, 0
+		for ri, rm := range rooms {
+			hits := 0
+			for _, t := range []float64{0.1, 0.3, 0.5, 0.7, 0.9} {
+				at := from + (to-from)*t
+				p := [2]float64{w.A[0] + ux*at + nx*side*probe, w.A[1] + uy*at + ny*side*probe}
+				if pointInPolygon(p, rm.Polygon) {
+					hits++
+				}
 			}
-			if pointInPolygon([2]float64{px - nx*probe, py - ny*probe}, rm.Polygon) {
-				hits++
+			if hits > bestHits {
+				best, bestHits = ri, hits
 			}
 		}
-		if hits > bestHits {
-			bestIdx, bestHits = ri, hits
+		if best < 0 {
+			return ""
 		}
+		rm := rooms[best]
+		for _, f := range faces {
+			if f.Wall == w.Name && f.Room == rm.Name {
+				return f.Color
+			}
+		}
+		return rm.WallColor
 	}
-	if bestIdx >= 0 {
-		return rooms[bestIdx].WallColor
+	left, right = face(1), face(-1)
+	switch {
+	case left == "" && right == "":
+		return neutralWallColor, neutralWallColor
+	case left == "":
+		return right, right
+	case right == "":
+		return left, left
 	}
-	return neutralWallColor
+	return left, right
 }
 
 func pointInPolygon(pt [2]float64, poly [][2]float64) bool {
@@ -703,8 +773,19 @@ func buildObjectsWithBudget(fp *fixedPlan, budget int) []wire.SceneShape {
 	copy(objs, fp.Objects)
 
 	// Orient objects before building parts: chairs face the nearest table, other objects back onto the nearest wall.
+	curtained := map[string]bool{}
+	for _, cu := range fp.Curtains {
+		curtained[cu.Wall] = true
+	}
 	for i := range objs {
 		orientObject(&objs[i], fp.Walls, objs)
+		kind := objs[i].Kind
+		if kind == "" {
+			kind = objs[i].Category
+		}
+		if !standsFree(kind) {
+			keepOffWalls(&objs[i], fp.Walls, curtained)
+		}
 	}
 
 	type builtObj struct {
@@ -873,17 +954,29 @@ func objectShapes(ob scanObject) (detailed []wire.SceneShape, plain wire.SceneSh
 
 	switch kind {
 	case "sofa":
+		// A plinth, a base, two arms, and a seat and back cushion per seat.
 		col := pickCol("#C8BBAE")
 		plainCol, plainMat = col, wire.SceneMaterialMatte
-		armW := min(0.16, w*0.18)
-		backD := min(0.20, d*0.28)
-		seatTop := b0 + h*0.44
+		armW := min(0.2, w*0.12)
+		backD := min(0.24, d*0.26)
+		baseTop := b0 + h*0.36
+		seatTop := b0 + h*0.53
 		parts = append(parts,
-			box(0, backD/2, max(0.06, w-2*armW), max(0.06, d-backD), 0.03, b0, seatTop, col, wire.SceneMaterialMatte),
-			box(0, -d/2+backD/2, w, backD, 0.03, b0, top, col, wire.SceneMaterialMatte),
-			box(-w/2+armW/2, 0, armW, d, 0.03, b0, b0+h*0.68, col, wire.SceneMaterialMatte),
-			box(w/2-armW/2, 0, armW, d, 0.03, b0, b0+h*0.68, col, wire.SceneMaterialMatte),
+			box(0, 0, max(0.06, w-0.08), max(0.06, d-0.08), 0.01, b0, b0+h*0.13, shade(col, -28), wire.SceneMaterialMatte),
+			box(0, 0, w, d, 0.03, b0+h*0.13, baseTop, col, wire.SceneMaterialMatte),
+			box(-w/2+armW/2, 0, armW, d, 0.05, b0+h*0.13, b0+h*0.74, shade(col, -8), wire.SceneMaterialMatte),
+			box(w/2-armW/2, 0, armW, d, 0.05, b0+h*0.13, b0+h*0.74, shade(col, -8), wire.SceneMaterialMatte),
 		)
+		inner := max(0.1, w-2*armW)
+		seats := max(1, min(4, int(math.Round(inner/0.65))))
+		cw := inner / float64(seats)
+		for k := range seats {
+			lx := -inner/2 + cw*(float64(k)+0.5)
+			parts = append(parts,
+				box(lx, (backD-0.03)/2, max(0.06, cw-0.03), max(0.06, d-backD-0.03), 0.05, baseTop, seatTop, shade(col, 10), wire.SceneMaterialMatte),
+				box(lx, -d/2+backD/2+0.02, max(0.06, cw-0.04), backD, 0.06, baseTop, top, shade(col, 4), wire.SceneMaterialMatte),
+			)
+		}
 
 	case "bed":
 		wood := pickCol("#B59672")
@@ -901,22 +994,71 @@ func objectShapes(ob scanObject) (detailed []wire.SceneShape, plain wire.SceneSh
 			box(w*0.23, -d/2+hbD+pd/2+0.04, pw, pd, 0.04, matTop, pilTop, "#FFFFFF", wire.SceneMaterialMatte),
 		)
 
-	case "table", "bar_table", "coffee_table":
+	case "table", "coffee_table":
 		col := pickCol("#BA9870")
 		plainCol = col
 		topThick := min(0.05, h*0.2)
 		legR := min(0.03, min(w, d)*0.08)
-		if kind == "bar_table" {
-			legR = min(0.035, min(w, d)*0.09)
-		}
 		under := max(b0+0.02, top-topThick)
 		parts = append(parts, box(0, 0, w, d, 0.02, under, top, col, wire.SceneMaterialWood))
 		ox, oy := max(0, w/2-legR-0.03), max(0, d/2-legR-0.03)
 		for _, sx := range []float64{-1, 1} {
 			for _, sy := range []float64{-1, 1} {
-				parts = append(parts, cyl(sx*ox, sy*oy, max(0.015, legR), b0, under, "#4A4A4E", wire.SceneMaterialMetal))
+				parts = append(parts, cyl(sx*ox, sy*oy, max(0.015, legR), b0, under, shade(col, -40), wire.SceneMaterialMetal))
 			}
 		}
+
+	case "bar_table":
+		// A top with one rounded end, on two cages of thin gold rods standing on white plates.
+		col := pickCol("#F4F2EC")
+		plainCol = col
+		under := max(b0+0.05, top-0.04)
+		long, short := d, w
+		along := func(t float64) (float64, float64) { return 0, t }
+		if w > d {
+			long, short = w, d
+			along = func(t float64) (float64, float64) { return t, 0 }
+		}
+		r := short / 2
+		rx, ry := along(long/2 - r)
+		cx, cy := along(-r / 2)
+		if long > short {
+			if w > d {
+				parts = append(parts, box(cx, cy, long-r, short, 0.01, under, top, col, wire.SceneMaterialMatte))
+			} else {
+				parts = append(parts, box(cx, cy, short, long-r, 0.01, under, top, col, wire.SceneMaterialMatte))
+			}
+		}
+		parts = append(parts, cyl(rx, ry, r, under, top, col, wire.SceneMaterialMatte))
+		cage := min(0.2, short*0.36)
+		for _, t := range []float64{-long * 0.33, long * 0.28} {
+			px, py := along(t)
+			parts = append(parts, cyl(px, py, cage, b0, b0+0.03, col, wire.SceneMaterialMatte))
+			for k := range 8 {
+				a := 2 * math.Pi * float64(k) / 8
+				parts = append(parts, cyl(px+cage*0.95*math.Cos(a), py+cage*0.95*math.Sin(a), 0.012, b0+0.03, under, goldColor, wire.SceneMaterialMetal))
+			}
+		}
+
+	case "round_coffee_table":
+		// A round top over a round shelf, on a gold post and foot.
+		col := pickCol("#F6F4EE")
+		plainCol, plainMat = col, wire.SceneMaterialMatte
+		r := max(0.2, min(w, d)/2)
+		parts = append(parts,
+			cyl(0, 0, r, max(b0+0.1, top-0.05), top, col, wire.SceneMaterialMatte),
+			cyl(0, 0, r*0.9, b0+h*0.27, b0+h*0.34, col, wire.SceneMaterialMatte),
+			cyl(0, 0, r*0.55, b0, b0+0.03, goldColor, wire.SceneMaterialMetal),
+			cyl(0, 0, 0.04, b0+0.03, max(b0+0.1, top-0.05), goldColor, wire.SceneMaterialMetal),
+		)
+
+	case "bench":
+		col := pickCol("#3C3430")
+		plainCol = col
+		parts = append(parts,
+			box(0, 0, w, d, 0.02, max(b0+0.05, top-0.05), top, col, wire.SceneMaterialWood),
+			box(0, 0, max(0.06, w-0.1), max(0.06, d-0.08), 0.01, b0, max(b0+0.05, top-0.05), shade(col, -16), wire.SceneMaterialWood),
+		)
 
 	case "chair":
 		col := pickCol("#C4A47C")
@@ -937,25 +1079,46 @@ func objectShapes(ob scanObject) (detailed []wire.SceneShape, plain wire.SceneSh
 		}
 
 	case "storage", "sideboard":
+		// A plinth, a carcass, doors with handles, and a top: trim on a tall cabinet, a dark slab on a sideboard. Matte: a
+		// painted or laminated front, which the app's wood grain would turn into bricks at this size.
 		col := pickCol("#C6AA86")
-		if kind == "sideboard" && ob.Color == "" {
-			col = "#5A4E44"
+		plainCol, plainMat = col, wire.SceneMaterialMatte
+		tall := h > 1.5
+		zb := b0
+		if b0 < 0.05 && h > 0.25 {
+			zb = b0 + 0.08
+			parts = append(parts, box(0, -0.01, max(0.06, w-0.04), max(0.06, d-0.04), 0.005, b0, zb, shade(col, -40), wire.SceneMaterialMatte))
 		}
-		plainCol = col
-		nDoors := min(8, max(1, int(math.Round(w/0.5))))
-		plinthTop := b0
-		if h > 0.25 {
-			plinthTop = b0 + 0.06
-			parts = append(parts, box(0, 0, max(0.06, w-0.04), max(0.06, d-0.04), 0.01, b0, plinthTop, col, wire.SceneMaterialWood))
+		parts = append(parts, box(0, -0.015, w, max(0.04, d-0.03), 0.01, zb, top, shade(col, -12), wire.SceneMaterialMatte))
+		doorW := 0.5
+		if tall {
+			doorW = 0.45
 		}
-		gap := 0.01
-		doorW := (w - gap*float64(nDoors-1)) / float64(nDoors)
-		if doorW < 0.04 {
-			nDoors, doorW, gap = 1, w, 0
+		n := max(1, min(8, int(math.Round(w/doorW))))
+		dw := w / float64(n)
+		for k := range n {
+			lx := -w/2 + dw*(float64(k)+0.5)
+			parts = append(parts, box(lx, d/2-0.015, max(0.02, dw-0.012), 0.03, 0.005, zb+0.006, top-0.006, col, wire.SceneMaterialMatte))
+			hx := lx + dw/2 - 0.05
+			if k%2 == 1 {
+				hx = lx - dw/2 + 0.05
+			}
+			hz0, hz1 := top-0.22, top-0.1
+			switch {
+			case tall:
+				hz0, hz1 = zb+0.85, zb+1.25
+			case b0 > 1.1:
+				hz0, hz1 = zb+0.04, zb+0.16
+			}
+			if hz1 <= top && dw > 0.12 {
+				parts = append(parts, box(hx, d/2+0.012, 0.02, 0.025, 0.004, hz0, hz1, "#B0B2B8", wire.SceneMaterialMetal))
+			}
 		}
-		for i := range nDoors {
-			lx := -w/2 + doorW/2 + float64(i)*(doorW+gap)
-			parts = append(parts, box(lx, 0, doorW, d, 0.01, plinthTop, top, col, wire.SceneMaterialWood))
+		if tall {
+			parts = append(parts, box(0, 0, w+0.02, d+0.015, 0.005, top, min(heightCap, top+0.04), shade(col, 6), wire.SceneMaterialMatte))
+		}
+		if kind == "sideboard" {
+			parts = append(parts, box(0, 0.01, w, d+0.02, 0.005, top, min(heightCap, top+0.03), "#3A3A3E", wire.SceneMaterialMatte))
 		}
 
 	case "glass_cabinet":
@@ -997,16 +1160,29 @@ func objectShapes(ob scanObject) (detailed []wire.SceneShape, plain wire.SceneSh
 		}
 
 	case "piano":
+		// A digital piano: side panels to the floor, a body, white keys with black keys, a back board and pedals.
 		col := pickCol("#242428")
-		plainCol, plainMat = col, wire.SceneMaterialMatte
-		keyD := min(0.18, d*0.32)
-		bodyD := max(0.10, d-keyD)
-		keyZ := b0 + h*0.62
+		plainCol, plainMat = col, wire.SceneMaterialWood
+		keyZ := b0 + min(0.74, h*0.75)
+		boardTop := min(top, keyZ+0.21)
 		parts = append(parts,
-			box(0, -keyD/2, w, bodyD, 0.015, b0, top, col, wire.SceneMaterialMatte),
-			box(0, d/2-keyD/2, max(0.10, w-0.08), keyD, 0.01, keyZ-0.05, keyZ, col, wire.SceneMaterialMatte),
-			box(0, d/2-keyD/2+0.01, max(0.08, w-0.14), max(0.06, keyD-0.03), 0.005, keyZ, keyZ+0.025, "#F7F5F0", wire.SceneMaterialMatte),
+			box(-w/2+0.02, -0.03, 0.04, max(0.06, d-0.06), 0.005, b0, keyZ-0.02, shade(col, -18), wire.SceneMaterialWood),
+			box(w/2-0.02, -0.03, 0.04, max(0.06, d-0.06), 0.005, b0, keyZ-0.02, shade(col, -18), wire.SceneMaterialWood),
+			box(0, -0.04, w, max(0.06, d-0.08), 0.01, keyZ-0.12, keyZ, col, wire.SceneMaterialWood),
+			box(0, d/2-0.1, max(0.1, w-0.12), 0.16, 0.003, keyZ-0.04, keyZ, "#F8F8F6", wire.SceneMaterialMatte),
+			box(0, -d/2+0.03, w, 0.06, 0.005, keyZ, max(keyZ+0.02, boardTop), col, wire.SceneMaterialWood),
+			box(0, -0.05, min(0.5, w*0.4), max(0.06, d-0.2), 0.005, b0+0.04, b0+0.08, shade(col, -30), wire.SceneMaterialMetal),
 		)
+		white := int((w - 0.12) / 0.045)
+		black := 0
+		for k := 0; k < white-1 && black < 24; k++ {
+			if k%7 == 2 || k%7 == 6 {
+				continue // no black key after E or B
+			}
+			lx := -w/2 + 0.06 + float64(k+1)*0.045
+			parts = append(parts, box(lx, d/2-0.135, 0.022, 0.09, 0, keyZ, keyZ+0.015, "#222226", wire.SceneMaterialScreen))
+			black++
+		}
 
 	case "sink":
 		plainCol, plainMat = "#F2F2F0", wire.SceneMaterialTile
@@ -1049,15 +1225,25 @@ func objectShapes(ob scanObject) (detailed []wire.SceneShape, plain wire.SceneSh
 		)
 
 	case "stove", "oven":
+		// A stove on a base cabinet: a plinth, two doors with handles, a worktop and a black hob with two burners.
 		col := pickCol("#D2D6DA")
-		plainCol, plainMat = col, wire.SceneMaterialMetal
-		cookZ := max(b0+0.04, top-0.03)
+		plainCol, plainMat = col, wire.SceneMaterialMatte
+		wt := b0 + min(h, 0.9) - 0.04
+		zb := b0 + min(0.08, h*0.1)
 		parts = append(parts,
-			box(0, 0, w, d, 0.015, b0, cookZ, col, wire.SceneMaterialMetal),
-			box(0, 0, max(0.08, w-0.04), max(0.08, d-0.04), 0.01, cookZ, top, "#26282C", wire.SceneMaterialScreen),
-			cyl(-w*0.22, 0, min(0.09, min(w, d)*0.18), top, min(heightCap, top+0.012), "#585C62", wire.SceneMaterialMetal),
-			cyl(w*0.22, 0, min(0.09, min(w, d)*0.18), top, min(heightCap, top+0.012), "#585C62", wire.SceneMaterialMetal),
+			box(0, -0.01, max(0.06, w-0.04), max(0.06, d-0.04), 0.005, b0, zb, shade(col, -40), wire.SceneMaterialMatte),
+			box(0, -0.015, w, max(0.04, d-0.03), 0.01, zb, wt, shade(col, -12), wire.SceneMaterialMatte),
+			box(-w/4, d/2-0.015, max(0.02, w/2-0.012), 0.03, 0.005, zb+0.006, wt-0.006, col, wire.SceneMaterialMatte),
+			box(w/4, d/2-0.015, max(0.02, w/2-0.012), 0.03, 0.005, zb+0.006, wt-0.006, col, wire.SceneMaterialMatte),
+			box(-0.04, d/2+0.012, 0.02, 0.025, 0.004, wt-0.22, wt-0.06, "#B0B2B8", wire.SceneMaterialMetal),
+			box(0.04, d/2+0.012, 0.02, 0.025, 0.004, wt-0.22, wt-0.06, "#B0B2B8", wire.SceneMaterialMetal),
+			box(0, 0.01, w, d+0.02, 0.005, wt, wt+0.04, "#ECEAE4", wire.SceneMaterialMatte),
+			box(0, 0, max(0.08, w-0.12), max(0.08, d-0.12), 0.01, wt+0.04, wt+0.055, "#1C1C20", wire.SceneMaterialScreen),
 		)
+		for _, sx := range []float64{-1, 1} {
+			r := min(0.09, min(w, d)*0.18)
+			parts = append(parts, cyl(sx*(w/4-0.03), 0, r, wt+0.055, wt+0.065, "#46464C", wire.SceneMaterialMetal))
+		}
 
 	case "fireplace":
 		col := pickCol("#D8D2C8")
@@ -1531,13 +1717,22 @@ func pinStateText(s State) string {
 	return clip(st, 40)
 }
 
-func countHomeLightsOn(hm *home, devs []fixDevice, pinnedLights map[string]bool) int {
+func countHomeLightsOn(hm *home, reg *Registry, devs []fixDevice, pinnedLights map[string]bool) int {
 	seen := map[string]bool{}
 	for eid := range pinnedLights {
 		seen[eid] = true
 	}
+	// a switch's indicator light is a light too, but a setting of the switch (entity_category config), not a lamp: the
+	// rest of the page leaves such entities out of its counts, and so does this one (#940)
+	setting := func(e string) bool {
+		if reg == nil {
+			return false
+		}
+		re, ok := reg.Entities[e]
+		return ok && (re.EntityCategory != "" || regHidden(reg, e))
+	}
 	for _, s := range hm.States {
-		if s.Domain() == "light" && s.State == "on" && hm.visible(s.EntityID) {
+		if s.Domain() == "light" && s.State == "on" && hm.visible(s.EntityID) && !setting(s.EntityID) {
 			seen[s.EntityID] = true
 		}
 	}
