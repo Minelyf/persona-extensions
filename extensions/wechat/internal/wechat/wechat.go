@@ -67,6 +67,9 @@ type Bot struct {
 	wake    chan struct{}
 	typing  *typing // the owner's chat shows the bot writing (the hub says while a turn goes on)
 	replied map[string]time.Time
+	// progress is how far each ref's channel.send got, oldest ref first in progressOrder (chat.go sendProgress).
+	progress      map[string]*sendProgress
+	progressOrder []string
 }
 
 // state is what is kept in the hub (sealed): never logged.
